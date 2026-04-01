@@ -1,0 +1,80 @@
+{
+  "boardId": "65b12c0d99a43d499da4f9fe",
+  "lists": {
+    "doing": "69cc7d34c4407c5015cdd209",
+    "review": "69cc7d350fc38416762bdbda",
+    "qa": "65b7a8a74c70fdf74eb9cb95",
+    "done": "69cc7d354e50b7bde5a35dd7"
+  },
+  "projectLists": [
+    {
+      "id": "65b12c0d92522b3e35598e5b",
+      "name": "Portal Bb2",
+      "repoUrl": "https://github.com/maismilhas-br/maismilhas.b2b.portal",
+      "baseBranch": "main",
+      "branchPrefix": "feat/"
+    },
+    {
+      "id": "65b7aa1ea6a0e4441a5c2281",
+      "name": "Mais Milhas V2",
+      "repoUrl": "https://github.com/maismilhas-br/maismilhas-v2",
+      "baseBranch": "main",
+      "branchPrefix": "feat/"
+    },
+    {
+      "id": "65b12c0e40fb7b8b9d74990f",
+      "name": "MilhasNexus",
+      "repoUrl": "https://github.com/maismilhas-br/nexus-mileage-ai",
+      "baseBranch": "main",
+      "branchPrefix": "feat/"
+    },
+    {
+      "id": "65b7a954fbd8c9fa3c9bed73",
+      "name": "Site American",
+      "repoUrl": "https://github.com/luizhenriquesoares/air-miles-advantage",
+      "baseBranch": "main",
+      "branchPrefix": "feat/"
+    },
+    {
+      "id": "65b7a94e71f183610d747e2d",
+      "name": "AI content",
+      "repoUrl": "https://github.com/maismilhas-br/web-mais-milhas",
+      "baseBranch": "main",
+      "branchPrefix": "feat/"
+    }
+  ],
+  "rules": [
+    "SEMPRE leia o CLAUDE.md e a estrutura do projeto antes de começar qualquer implementação",
+    "## Backend (NestJS + Mongoose)",
+    "Seguir Clean Architecture: domain → application → infrastructure → presentation",
+    "Use cases devem ter um único método execute() e receber dependências via @Inject() com tokens PORTAL_TOKENS",
+    "Repositórios: interface I{Entity}Repository em application/ports/, implementação Mongo{Entity}Repository em infrastructure/persistence/",
+    "Erros de domínio: criar classes específicas estendendo DomainError com código (NOT_FOUND, UNAUTHORIZED, VALIDATION_ERROR, CONFLICT, FORBIDDEN)",
+    "Controllers devem ser finos: extrair header x-b2b-token, chamar use case, retornar resultado. Sem lógica de negócio",
+    "Usar .lean() em queries de leitura do Mongoose para performance",
+    "Usar .findOneAndUpdate() para operações atômicas (reservas, atualizações concorrentes)",
+    "Schemas MongoDB com prefixo B2B (B2BClient, B2BSession, etc.) na conexão 'nexus'",
+    "Entities são interfaces TypeScript, não classes — manter leve",
+    "## Frontend (React + Vite + Tailwind)",
+    "Componentes funcionais com hooks (useState, useCallback, useEffect, useRef, useMemo)",
+    "API centralizada em lib/b2b-api.ts usando b2bFetch() — nunca usar fetch() direto",
+    "Estilização com Tailwind CSS + variáveis CSS customizadas (HSL). Não usar CSS inline ou styled-components",
+    "Componentes UI com Radix UI + CVA (class-variance-authority) seguindo padrão shadcn/ui em components/ui/",
+    "Erros: try-catch + useToast() para feedback ao usuário",
+    "Loading states: usar useState<boolean> loading + componentes Skeleton",
+    "Ícones: usar lucide-react exclusivamente",
+    "Animações: framer-motion para transições complexas, tailwindcss-animate para simples",
+    "Utility cn() de lib/utils.ts para merge de classes Tailwind (clsx + tailwind-merge)",
+    "Formatação: formatNumber() e formatBRL() de lib/constants.ts — nunca formatar manualmente",
+    "## Geral",
+    "TypeScript estrito: NUNCA usar 'any' — tipar tudo com interfaces/types específicos",
+    "Nomes descritivos seguindo Clean Code: variáveis, funções e classes autoexplicativas",
+    "Aplicar SOLID: Single Responsibility, Open/Closed, Liskov, Interface Segregation, Dependency Inversion",
+    "Usar constantes para valores fixos — zero magic numbers ou magic strings",
+    "Não adicionar Co-Authored-By em commits",
+    "Não criar arquivos de documentação (README, .md) a menos que o card peça explicitamente",
+    "Não adicionar comentários óbvios — só comentar lógica não trivial",
+    "Não fazer over-engineering: implementar exatamente o que o card pede, sem features extras",
+    "Commit com mensagem clara e concisa em inglês descrevendo o que foi feito"
+  ]
+}

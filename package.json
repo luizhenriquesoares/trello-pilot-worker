@@ -1,0 +1,22 @@
+{
+  "name": "trello-pilot-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Headless Trello Code Pilot worker for Railway — runs the full AI pipeline without VS Code",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsup",
+    "start": "node dist/index.js",
+    "dev": "tsup --watch"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.700.0",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.7.0"
+  }
+}
