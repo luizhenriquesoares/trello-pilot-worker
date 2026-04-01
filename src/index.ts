@@ -29,8 +29,12 @@ async function main(): Promise<void> {
 
   console.log(`[Worker] Board: ${boardConfig.boardId}, Projects: ${boardConfig.projectLists.length}`);
 
-  // Authenticate gh CLI with GH_TOKEN
-  await authenticateGhCli(envConfig.ghToken);
+  // Authenticate gh CLI with GH_TOKEN (skip if not set)
+  if (envConfig.ghToken) {
+    await authenticateGhCli(envConfig.ghToken);
+  } else {
+    console.warn('[Worker] GH_TOKEN not set — gh CLI not authenticated');
+  }
 
   // Initialize dependencies
   const trelloCredentials = { key: envConfig.trelloKey, token: envConfig.trelloToken };
@@ -95,9 +99,13 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  // Start SQS polling loop
-  console.log('[Worker] Starting SQS polling loop...');
-  await pollLoop(sqsConsumer, orchestrator);
+  // Start SQS polling loop (only if SQS is configured)
+  if (envConfig.sqsQueueUrl) {
+    console.log('[Worker] Starting SQS polling loop...');
+    await pollLoop(sqsConsumer, orchestrator);
+  } else {
+    console.warn('[Worker] SQS_QUEUE_URL not set — polling disabled (webhook-only mode)');
+  }
 }
 
 // --- SQS Polling ---
