@@ -1,10 +1,11 @@
 import express, { type Express } from 'express';
 import { WebhookHandler } from './webhook-handler.js';
 import { JobTracker } from '../tracking/job-tracker.js';
+import { LogBuffer } from '../tracking/log-buffer.js';
 
 const STARTED_AT = new Date().toISOString();
 
-export function createApp(webhookHandler: WebhookHandler, jobTracker: JobTracker): Express {
+export function createApp(webhookHandler: WebhookHandler, jobTracker: JobTracker, logBuffer: LogBuffer): Express {
   const app = express();
 
   app.use(express.json());
@@ -41,6 +42,10 @@ export function createApp(webhookHandler: WebhookHandler, jobTracker: JobTracker
 
   app.get('/api/jobs', (_req, res) => {
     res.json(jobTracker.getJobs());
+  });
+
+  app.get('/api/logs', (_req, res) => {
+    res.json(logBuffer.getAll());
   });
 
   // Trello webhook verification (HEAD)

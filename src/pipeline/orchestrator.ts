@@ -5,6 +5,7 @@ import { SqsProducer, type PipelineContext } from '../sqs/producer.js';
 import { TrelloApi } from '../trello/api.js';
 import { TrelloCommenter } from '../notifications/trello-commenter.js';
 import { SlackNotifier } from '../notifications/slack.js';
+import { JobTracker } from '../tracking/job-tracker.js';
 import { PipelineStage } from '../shared/types/pipeline-stage.js';
 import type { WorkerEvent } from '../shared/types/worker-event.js';
 import type { BoardConfig } from '../config/types.js';
@@ -25,10 +26,29 @@ export class PipelineOrchestrator {
     private readonly commenter: TrelloCommenter,
     private readonly slackNotifier: SlackNotifier,
     private readonly boardConfig: BoardConfig,
+    private readonly jobTracker?: JobTracker,
   ) {}
 
   async processEvent(event: WorkerEvent, pipelineContext?: PipelineContext): Promise<void> {
-    console.log(`[Orchestrator] Processing ${event.stage} for card ${event.cardId}`);
+    const stageMap: Record<PipelineStage, 'implement' | 'review' | 'qa'> = {
+      [PipelineStage.IMPLEMENT]: 'implement',
+      [PipelineStage.REVIEW]: 'review',
+      [PipelineStage.QA]: 'qa',
+    };
+
+    const stageName = stageMap[event.stage];
+
+    // Fetch card name for tracking
+    let cardName = event.cardId;
+    try {
+      const card = await this.trelloApi.getCard(event.cardId);
+      cardName = card.name;
+    } catch { /* use cardId as fallback */ }
+
+    console.log(`[Orchestrator] Processing ${stageName} for: ${cardName}`);
+
+    // Track job start
+    const jobId = this.jobTracker?.start(event.cardId, cardName, event.projectName || 'Unknown', stageName);
 
     try {
       switch (event.stage) {
@@ -46,19 +66,28 @@ export class PipelineOrchestrator {
           throw new Error(`Unknown pipeline stage: ${exhaustiveCheck}`);
         }
       }
+
+      // Track job success
+      if (jobId) {
+        this.jobTracker?.complete(jobId, {
+          branch: pipelineContext?.branchName,
+          prUrl: pipelineContext?.prUrl,
+        });
+      }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       console.error(`[Orchestrator] Stage ${event.stage} failed for card ${event.cardId}: ${errorMessage}`);
 
-      // Comment error on Trello — do NOT advance the pipeline
+      // Track job failure
+      if (jobId) {
+        this.jobTracker?.fail(jobId, errorMessage);
+      }
+
       await this.commenter.postError(event.cardId, event.stage, errorMessage).catch((commentErr) => {
         console.error(`[Orchestrator] Failed to post error comment: ${(commentErr as Error).message}`);
       });
 
-      // Notify Slack about the failure
-      await this.slackNotifier.notifyError(event.cardId, event.stage, errorMessage).catch(() => {
-        // Slack notification is best-effort
-      });
+      await this.slackNotifier.notifyError(event.cardId, event.stage, errorMessage).catch(() => {});
     }
   }
 

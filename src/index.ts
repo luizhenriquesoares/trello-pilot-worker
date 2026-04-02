@@ -14,6 +14,7 @@ import { SlackNotifier } from './notifications/slack.js';
 import { loadEnvConfig } from './config/env.js';
 import { loadBoardConfig } from './config/board-config.js';
 import { JobTracker } from './tracking/job-tracker.js';
+import { LogBuffer } from './tracking/log-buffer.js';
 
 // --- Globals ---
 
@@ -22,6 +23,10 @@ let isShuttingDown = false;
 // --- Bootstrap ---
 
 async function main(): Promise<void> {
+  // Install log buffer to capture all console output
+  const logBuffer = new LogBuffer();
+  logBuffer.install();
+
   console.log('[Worker] Starting trello-pilot-worker...');
 
   // Load configuration
@@ -63,6 +68,7 @@ async function main(): Promise<void> {
     commenter,
     slackNotifier,
     boardConfig,
+    jobTracker,
   );
 
   // Job tracker
@@ -76,7 +82,7 @@ async function main(): Promise<void> {
     envConfig.trelloWebhookSecret,
     undefined, // callbackUrl resolved at runtime if needed
   );
-  const app = createApp(webhookHandler, jobTracker);
+  const app = createApp(webhookHandler, jobTracker, logBuffer);
 
   const server = app.listen(envConfig.port, () => {
     console.log(`[Worker] Express server listening on port ${envConfig.port}`);
