@@ -65,6 +65,15 @@ async function main(): Promise<void> {
   const sqsConsumer = new SqsConsumer(envConfig.sqsQueueUrl, envConfig.awsRegion);
   const sqsProducer = new SqsProducer(envConfig.sqsQueueUrl, envConfig.awsRegion);
 
+  // Deploy watcher — polls Railway API to confirm deploys before moving cards to Done
+  const deployWatcher = envConfig.railwayToken
+    ? new DeployWatcher(trelloApi, boardConfig, envConfig.railwayToken)
+    : undefined;
+
+  if (!deployWatcher) {
+    console.warn('[Worker] RAILWAY_TOKEN not set — cards move to Done immediately after QA (no deploy verification)');
+  }
+
   // Orchestrator
   const orchestrator = new PipelineOrchestrator(
     implementStage,
@@ -77,6 +86,7 @@ async function main(): Promise<void> {
     boardConfig,
     jobTracker,
     broadcaster,
+    deployWatcher,
   );
 
   // Webhook handler + Express server

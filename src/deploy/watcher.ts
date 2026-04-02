@@ -1,124 +1,191 @@
-import type { PipelineOrchestrator } from '../pipeline/orchestrator.js';
+import * as fs from 'fs';
+import { TrelloApi } from '../trello/api.js';
 import type { BoardConfig } from '../config/types.js';
 
-const RAILWAY_API = 'https://backboard.railway.com/graphql/v2';
+const POLL_INTERVAL_MS = 30_000; // 30 seconds
+const PENDING_FILE = '/tmp/trello-pilot-pending-deploys.json';
 
-interface RailwayProject {
-  id: string;
-  label: string;
+interface PendingDeploy {
+  cardId: string;
+  projectName: string;
+  railwayProjectId: string;
+  branchName: string;
+  repoUrl: string;
+  mergedAt: string;
+  totalCostUsd: number;
 }
 
-/**
- * Polls Railway API to detect successful deployments.
- * When a deploy succeeds after a QA merge, moves the card to Done.
- */
+interface RailwayDeployment {
+  id: string;
+  status: string;
+  createdAt: string;
+}
+
 export class DeployWatcher {
-  private readonly railwayToken: string;
-  private readonly projects: RailwayProject[];
-  private lastDeployTimes = new Map<string, string>(); // serviceId → last deploy timestamp
-  private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private polling = false;
+  private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
-    railwayToken: string,
-    boardConfig: BoardConfig,
-    private readonly orchestrator: PipelineOrchestrator,
+    private readonly trelloApi: TrelloApi,
+    private readonly boardConfig: BoardConfig,
+    private readonly railwayToken: string,
   ) {
-    this.railwayToken = railwayToken;
-
-    // Map project lists to Railway project IDs
-    // These are configured in the board config's projectLists
-    this.projects = boardConfig.projectLists
-      .filter((p) => p.railwayProjectId)
-      .map((p) => ({ id: p.railwayProjectId!, label: p.name }));
+    // Resume watching on startup if there are pending deploys
+    const pending = this.loadPending();
+    if (Object.keys(pending).length > 0) {
+      console.log(`[DeployWatcher] Resuming watch for ${Object.keys(pending).length} pending deploys`);
+      this.start();
+    }
   }
 
-  /** Start polling every N seconds */
-  start(intervalMs: number = 30_000): void {
-    if (!this.railwayToken || this.projects.length === 0) {
-      console.log('[DeployWatcher] No Railway token or projects configured — skipping');
+  /** Add a card to watch for deploy after QA merge */
+  addPending(cardId: string, projectName: string, totalCostUsd: number, branchName: string, repoUrl: string): void {
+    const project = this.boardConfig.projectLists?.find((p) => p.name === projectName);
+    const railwayProjectId = (project as Record<string, unknown>)?.railwayProjectId as string | undefined;
+
+    if (!railwayProjectId) {
+      // No Railway project configured — move to Done immediately
+      console.log(`[DeployWatcher] No railwayProjectId for "${projectName}" — moving to Done immediately`);
+      this.completeCard(cardId, totalCostUsd, branchName, repoUrl, false);
       return;
     }
 
-    console.log(`[DeployWatcher] Watching ${this.projects.length} Railway projects (every ${intervalMs / 1000}s)`);
+    const pending = this.loadPending();
+    pending[cardId] = { cardId, projectName, railwayProjectId, branchName, repoUrl, mergedAt: new Date().toISOString(), totalCostUsd };
+    this.savePending(pending);
 
-    // Initial check to capture current deploy times
-    this.check().catch(() => {});
+    console.log(`[DeployWatcher] Watching deploy for "${projectName}" (card ${cardId})`);
+    if (!this.timer) this.start();
+  }
 
-    this.intervalHandle = setInterval(() => {
-      this.check().catch((err) => {
-        console.error(`[DeployWatcher] Check failed: ${(err as Error).message}`);
-      });
-    }, intervalMs);
+  start(): void {
+    if (this.timer) return;
+    console.log('[DeployWatcher] Polling Railway every 30s');
+    this.timer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
+    this.poll(); // run immediately
   }
 
   stop(): void {
-    if (this.intervalHandle) {
-      clearInterval(this.intervalHandle);
-      this.intervalHandle = null;
-    }
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
-  private async check(): Promise<void> {
-    const pending = this.orchestrator.getPendingDeploys();
-    if (pending.length === 0) return; // Nothing waiting for deploy
+  private async poll(): Promise<void> {
+    if (this.polling) return;
+    this.polling = true;
 
-    for (const project of this.projects) {
-      try {
-        const deploys = await this.fetchLatestDeploys(project.id);
+    try {
+      const pending = this.loadPending();
+      const cardIds = Object.keys(pending);
+      if (cardIds.length === 0) { this.stop(); return; }
 
-        for (const deploy of deploys) {
-          if (deploy.status !== 'SUCCESS') continue;
+      for (const cardId of cardIds) {
+        const entry = pending[cardId];
+        try {
+          const deploy = await this.getLatestDeploy(entry.railwayProjectId);
+          if (!deploy) continue;
 
-          const lastKnown = this.lastDeployTimes.get(deploy.serviceId);
+          const deployTime = new Date(deploy.createdAt).getTime();
+          const mergeTime = new Date(entry.mergedAt).getTime();
+          if (deployTime < mergeTime) continue; // deploy from before merge
 
-          if (lastKnown && deploy.createdAt > lastKnown) {
-            // New successful deploy detected!
-            console.log(`[DeployWatcher] New deploy detected: ${deploy.serviceName} (${project.label})`);
-
-            // Check if any pending card matches this project
-            for (const card of pending) {
-              if (card.projectName === project.label) {
-                await this.orchestrator.confirmDeploy(card.cardId);
-              }
-            }
+          if (deploy.status === 'SUCCESS') {
+            console.log(`[DeployWatcher] Deploy SUCCESS for "${entry.projectName}"`);
+            await this.completeCard(cardId, entry.totalCostUsd, entry.branchName, entry.repoUrl, true);
+            delete pending[cardId];
+            this.savePending(pending);
+          } else if (deploy.status === 'FAILED' || deploy.status === 'CRASHED') {
+            console.log(`[DeployWatcher] Deploy FAILED for "${entry.projectName}"`);
+            await this.trelloApi.addComment(cardId,
+              `**Deploy failed** on Railway\n\nProject: ${entry.projectName}\nStatus: ${deploy.status}\n\nCard stays in QA. Fix and re-deploy.`
+            ).catch(() => {});
+            delete pending[cardId];
+            this.savePending(pending);
           }
-
-          this.lastDeployTimes.set(deploy.serviceId, deploy.createdAt);
+          // BUILDING, DEPLOYING → keep waiting
+        } catch (err) {
+          console.error(`[DeployWatcher] Error: ${(err as Error).message}`);
         }
-      } catch (err) {
-        console.error(`[DeployWatcher] Error checking ${project.label}: ${(err as Error).message}`);
       }
+    } finally {
+      this.polling = false;
     }
   }
 
-  private async fetchLatestDeploys(projectId: string): Promise<
-    { serviceId: string; serviceName: string; status: string; createdAt: string }[]
-  > {
-    const resp = await fetch(RAILWAY_API, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.railwayToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query: `query { project(id: "${projectId}") { services { edges { node { id name deployments(first: 1) { edges { node { status createdAt } } } } } } } }`,
-      }),
+  private async completeCard(cardId: string, totalCostUsd: number, branchName: string, repoUrl: string, deployVerified: boolean): Promise<void> {
+    // Move card to Done
+    await this.trelloApi.moveCard(cardId, this.boardConfig.lists.done).catch((err) => {
+      console.error(`[DeployWatcher] Move to Done failed: ${(err as Error).message}`);
     });
 
-    const data = await resp.json() as Record<string, unknown>;
-    const project = (data.data as Record<string, unknown>)?.project as Record<string, unknown>;
-    const services = (project?.services as Record<string, unknown>)?.edges as Array<Record<string, unknown>> || [];
+    // Comment
+    const msg = deployVerified
+      ? `**Deployed to production**\n\nDeploy verified via Railway.\nTotal cost: $${totalCostUsd.toFixed(4)}\nTask **Done**.`
+      : `**Pipeline complete**\n\nMerged to main.\nTotal cost: $${totalCostUsd.toFixed(4)}\nTask **Done**.`;
+    await this.trelloApi.addComment(cardId, msg).catch(() => {});
 
-    return services.map((edge) => {
-      const svc = edge.node as Record<string, unknown>;
-      const deploys = (svc.deployments as Record<string, unknown>)?.edges as Array<Record<string, unknown>> || [];
-      const last = (deploys[0]?.node as Record<string, unknown>) || {};
-      return {
-        serviceId: svc.id as string,
-        serviceName: svc.name as string,
-        status: (last.status as string) || 'UNKNOWN',
-        createdAt: (last.createdAt as string) || '',
-      };
-    }).filter((d) => !d.serviceName.toLowerCase().includes('mongo') && !d.serviceName.toLowerCase().includes('postgres'));
+    // Clean up: delete remote feature branch
+    if (branchName && branchName !== 'main' && branchName !== 'master') {
+      await this.deleteRemoteBranch(repoUrl, branchName);
+    }
+  }
+
+  /** Delete remote feature branch to keep repo clean */
+  private async deleteRemoteBranch(repoUrl: string, branchName: string): Promise<void> {
+    try {
+      // Extract owner/repo from URL
+      const match = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+      if (!match) return;
+      const [, owner, repo] = match;
+
+      const ghToken = process.env.GH_TOKEN;
+      if (!ghToken) return;
+
+      const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branchName}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `token ${ghToken}`, 'Accept': 'application/vnd.github.v3+json' },
+      });
+
+      if (res.ok || res.status === 422) {
+        console.log(`[DeployWatcher] Deleted remote branch: ${branchName}`);
+      } else {
+        console.warn(`[DeployWatcher] Failed to delete branch ${branchName}: ${res.status}`);
+      }
+    } catch (err) {
+      console.warn(`[DeployWatcher] Branch cleanup failed: ${(err as Error).message}`);
+    }
+  }
+
+  private async getLatestDeploy(railwayProjectId: string): Promise<RailwayDeployment | null> {
+    const query = `query { project(id: "${railwayProjectId}") { services { edges { node { deployments(first: 1) { edges { node { id status createdAt } } } } } } } }`;
+
+    const res = await fetch('https://backboard.railway.com/graphql/v2', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${this.railwayToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json() as Record<string, unknown>;
+    let latest: RailwayDeployment | null = null;
+
+    const project = (data as { data?: { project?: { services?: { edges?: Array<{ node?: { deployments?: { edges?: Array<{ node?: RailwayDeployment }> } } }> } } } }).data?.project;
+    for (const svc of project?.services?.edges || []) {
+      const deploy = svc.node?.deployments?.edges?.[0]?.node;
+      if (deploy && (!latest || new Date(deploy.createdAt) > new Date(latest.createdAt))) {
+        latest = deploy;
+      }
+    }
+
+    return latest;
+  }
+
+  private loadPending(): Record<string, PendingDeploy> {
+    try { if (fs.existsSync(PENDING_FILE)) return JSON.parse(fs.readFileSync(PENDING_FILE, 'utf-8')); } catch { /* */ }
+    return {};
+  }
+
+  private savePending(p: Record<string, PendingDeploy>): void {
+    fs.writeFileSync(PENDING_FILE, JSON.stringify(p, null, 2), 'utf-8');
   }
 }
