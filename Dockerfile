@@ -30,16 +30,16 @@ COPY package.json config.json ./
 
 # Create non-root user (Claude CLI refuses --dangerously-skip-permissions as root)
 RUN useradd -m -s /bin/bash pilot
-RUN git config --global user.email "trello-pilot@automation" \
-    && git config --global user.name "Trello Code Pilot"
+RUN git config --global user.email "luizhenriquesoares91@gmail.com" \
+    && git config --global user.name "Luiz Henrique Soares"
 
 # Set ownership and switch to non-root
 RUN chown -R pilot:pilot /app /tmp
 USER pilot
 
 # Git config for the non-root user
-RUN git config --global user.email "trello-pilot@automation" \
-    && git config --global user.name "Trello Code Pilot"
+RUN git config --global user.email "luizhenriquesoares91@gmail.com" \
+    && git config --global user.name "Luiz Henrique Soares"
 
 EXPOSE 3000
 CMD ["node", "dist/index.js"]

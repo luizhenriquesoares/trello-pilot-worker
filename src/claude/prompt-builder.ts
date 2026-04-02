@@ -167,6 +167,7 @@ export class PromptBuilder {
     sections.push('');
     sections.push('IMPORTANT: This is a fully automated pipeline. Do NOT ask for confirmation. Do NOT wait for user input. Execute all changes immediately, commit, and finish.');
     sections.push('Do NOT commit unrelated files like .trello-pilot-origins.json, .trello-pilot.json, or any config/env files.');
+    sections.push('Do NOT add Co-Authored-By lines in commit messages. Do NOT use --author flag. Commit as the default git user.');
     sections.push('');
     sections.push(`Trello card: ${card.url}`);
 
@@ -272,6 +273,7 @@ export class PromptBuilder {
     sections.push('');
     sections.push('IMPORTANT: This is a fully automated pipeline. Do NOT ask for confirmation. Do NOT wait for user input. Execute all changes immediately, commit, and finish.');
     sections.push('Do NOT commit unrelated files like .trello-pilot-origins.json, .trello-pilot.json, or any config/env files.');
+    sections.push('Do NOT add Co-Authored-By lines in commit messages. Do NOT use --author flag. Commit as the default git user.');
     sections.push('');
     sections.push(`Trello card: ${card.url}`);
 
@@ -387,6 +389,7 @@ export class PromptBuilder {
     sections.push('');
     sections.push('IMPORTANT: This is a fully automated pipeline. Do NOT ask for confirmation. Do NOT wait for user input. Execute all changes immediately, commit, and finish.');
     sections.push('Do NOT commit unrelated files like .trello-pilot-origins.json, .trello-pilot.json, or any config/env files.');
+    sections.push('Do NOT add Co-Authored-By lines in commit messages. Do NOT use --author flag. Commit as the default git user.');
     sections.push('');
     sections.push(`Trello card: ${card.url}`);
 
@@ -582,6 +585,7 @@ export class PromptBuilder {
 
     sections.push('IMPORTANT: This is a fully automated pipeline. Do NOT ask for confirmation. Do NOT wait for user input. Execute all changes immediately, commit, and finish.');
     sections.push('Do NOT commit unrelated files like .trello-pilot-origins.json, .trello-pilot.json, or any config/env files.');
+    sections.push('Do NOT add Co-Authored-By lines in commit messages. Do NOT use --author flag. Commit as the default git user.');
     sections.push('');
     sections.push(`Trello card: ${card.url}`);
 
