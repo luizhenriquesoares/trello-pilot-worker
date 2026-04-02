@@ -13,6 +13,7 @@ import { TrelloCommenter } from './notifications/trello-commenter.js';
 import { SlackNotifier } from './notifications/slack.js';
 import { loadEnvConfig } from './config/env.js';
 import { loadBoardConfig } from './config/board-config.js';
+import { JobTracker } from './tracking/job-tracker.js';
 
 // --- Globals ---
 
@@ -64,6 +65,9 @@ async function main(): Promise<void> {
     boardConfig,
   );
 
+  // Job tracker
+  const jobTracker = new JobTracker();
+
   // Webhook handler + Express server
   const webhookHandler = new WebhookHandler(
     sqsProducer,
@@ -72,7 +76,7 @@ async function main(): Promise<void> {
     envConfig.trelloWebhookSecret,
     undefined, // callbackUrl resolved at runtime if needed
   );
-  const app = createApp(webhookHandler);
+  const app = createApp(webhookHandler, jobTracker);
 
   const server = app.listen(envConfig.port, () => {
     console.log(`[Worker] Express server listening on port ${envConfig.port}`);
