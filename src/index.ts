@@ -51,6 +51,10 @@ async function main(): Promise<void> {
   const commenter = new TrelloCommenter(trelloApi);
   const slackNotifier = new SlackNotifier(envConfig.slackWebhookUrl);
 
+  // Job tracker + WebSocket broadcaster
+  const jobTracker = new JobTracker();
+  const broadcaster = new StreamBroadcaster();
+
   // Pipeline stages
   const implementStage = new ImplementStage(repoManager, trelloApi, commenter);
   const reviewStage = new ReviewStage(repoManager, trelloApi, commenter);
@@ -73,10 +77,6 @@ async function main(): Promise<void> {
     jobTracker,
     broadcaster,
   );
-
-  // Job tracker + WebSocket broadcaster
-  const jobTracker = new JobTracker();
-  const broadcaster = new StreamBroadcaster();
 
   // Webhook handler + Express server
   const webhookHandler = new WebhookHandler(
