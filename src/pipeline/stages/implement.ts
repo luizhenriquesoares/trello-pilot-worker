@@ -75,11 +75,23 @@ export class ImplementStage {
       console.warn(`[Implement] Claude exited with code ${runResult.exitCode}`);
     }
 
+    // Check if Claude made any commits
+    const commitLog = await this.repoManager.getCommitLog(workDir);
+    if (!commitLog.trim()) {
+      console.warn('[Implement] No commits were made by Claude — nothing to push');
+      return {
+        branchName,
+        prUrl: '',
+        workDir,
+        costUsd,
+        durationMs: Date.now() - startTime,
+      };
+    }
+
     // Push and create PR
     console.log(`[Implement] Pushing branch: ${branchName}`);
     await this.repoManager.push(workDir, branchName);
 
-    const commitLog = await this.repoManager.getCommitLog(workDir);
     const prBody = [
       `## Trello Card`,
       card.url,
@@ -91,21 +103,31 @@ export class ImplementStage {
       '_Automated by Trello Pilot Worker_',
     ].join('\n');
 
-    const prInfo = await this.repoManager.createPr(workDir, card.name, prBody, baseBranch);
-    console.log(`[Implement] PR created: ${prInfo.url}`);
+    let prUrl = '';
+    try {
+      const prInfo = await this.repoManager.createPr(workDir, card.name, prBody, baseBranch);
+      prUrl = prInfo.url;
+      console.log(`[Implement] PR created: ${prUrl}`);
+    } catch (err) {
+      console.warn(`[Implement] PR creation failed: ${(err as Error).message}`);
+      // PR may already exist — try to find it
+      try {
+        prUrl = await this.repoManager.getPrUrl(workDir, branchName);
+      } catch { /* ignore */ }
+    }
 
     // Comment on Trello and move card
     const durationMs = Date.now() - startTime;
     await this.commenter.postImplementComplete(card.id, {
       branchName,
-      prUrl: prInfo.url,
+      prUrl,
       durationMs,
       costUsd,
     });
 
     return {
       branchName,
-      prUrl: prInfo.url,
+      prUrl,
       workDir,
       costUsd,
       durationMs,
