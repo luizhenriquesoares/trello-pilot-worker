@@ -106,6 +106,10 @@ export class PromptBuilder {
       sections.push('- Check that you haven\'t broken adjacent functionality');
       sections.push('');
       sections.push('### Step 5 — Commit');
+      sections.push('- Before committing, run formatting if tools exist:');
+      sections.push('  - `npx eslint --fix . 2>/dev/null || true` (fix lint issues)');
+      sections.push('  - `npx prettier --write "**/*.{ts,tsx,js,jsx}" 2>/dev/null || true` (format code)');
+      sections.push('  - Only run these if the tools are installed (the || true prevents failure if not installed)');
       sections.push('- Commit with message: "fix: <what was fixed and why>"');
       sections.push('- The commit message should explain the root cause, not just the change');
       sections.push('');
@@ -161,6 +165,10 @@ export class PromptBuilder {
       sections.push('- Remove the console.logs after verification');
       sections.push('');
       sections.push('### Step 5 — Commit');
+      sections.push('- Before committing, run formatting if tools exist:');
+      sections.push('  - `npx eslint --fix . 2>/dev/null || true` (fix lint issues)');
+      sections.push('  - `npx prettier --write "**/*.{ts,tsx,js,jsx}" 2>/dev/null || true` (format code)');
+      sections.push('  - Only run these if the tools are installed (the || true prevents failure if not installed)');
       sections.push('- Commit with a clear message describing what was implemented and WHERE');
     }
 
@@ -262,6 +270,10 @@ export class PromptBuilder {
     sections.push('- Check that you have not broken adjacent functionality');
     sections.push('');
     sections.push('### Step 5 — Commit');
+    sections.push('- Before committing, run formatting if tools exist:');
+    sections.push('  - `npx eslint --fix . 2>/dev/null || true` (fix lint issues)');
+    sections.push('  - `npx prettier --write "**/*.{ts,tsx,js,jsx}" 2>/dev/null || true` (format code)');
+    sections.push('  - Only run these if the tools are installed (the || true prevents failure if not installed)');
     sections.push('- Commit with message: "fix: retry — <what was fixed based on feedback>"');
     sections.push('- The commit message should reference the feedback and explain the fix');
     sections.push('');
@@ -384,7 +396,12 @@ export class PromptBuilder {
     sections.push('- **Issue**: description');
     sections.push('- **Fix**: suggested change');
     sections.push('');
-    sections.push('If issues are found, fix them directly in the code. Commit with message: "fix: code review fixes for <task-name>"');
+    sections.push('If issues are found, fix them directly in the code.');
+    sections.push('- Before committing, run formatting if tools exist:');
+    sections.push('  - `npx eslint --fix . 2>/dev/null || true` (fix lint issues)');
+    sections.push('  - `npx prettier --write "**/*.{ts,tsx,js,jsx}" 2>/dev/null || true` (format code)');
+    sections.push('  - Only run these if the tools are installed (the || true prevents failure if not installed)');
+    sections.push('Commit with message: "fix: code review fixes for <task-name>"');
     sections.push('If no issues, report "Review passed — no issues found."');
     sections.push('');
     sections.push('IMPORTANT: This is a fully automated pipeline. Do NOT ask for confirmation. Do NOT wait for user input. Execute all changes immediately, commit, and finish.');
@@ -577,7 +594,11 @@ export class PromptBuilder {
     sections.push('');
     sections.push('### Step 10 — If ANY check fails');
     sections.push('1. Fix the issues directly in the code');
-    sections.push('2. Commit with message: "fix: QA fixes for <task-name>"');
+    sections.push('2. Before committing, run formatting if tools exist:');
+    sections.push('   - `npx eslint --fix . 2>/dev/null || true` (fix lint issues)');
+    sections.push('   - `npx prettier --write "**/*.{ts,tsx,js,jsx}" 2>/dev/null || true` (format code)');
+    sections.push('   - Only run these if the tools are installed (the || true prevents failure if not installed)');
+    sections.push('3. Commit with message: "fix: QA fixes for <task-name>"');
     sections.push('3. Re-run the failing checks');
     sections.push('4. If all pass now, proceed with merge (Step 10 above)');
     sections.push('5. If still failing, report the failures and do NOT merge');

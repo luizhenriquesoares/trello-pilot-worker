@@ -40,10 +40,18 @@ export class SqsProducer {
     return this.sendEnvelope({ event, pipelineContext: context });
   }
 
-  private async sendEnvelope(envelope: SqsMessageEnvelope): Promise<string> {
+  /**
+   * Re-enqueue a message with a delay (seconds). Used for repo lock contention.
+   */
+  async sendWithDelay(envelope: SqsMessageEnvelope, delaySeconds: number): Promise<string> {
+    return this.sendEnvelope(envelope, delaySeconds);
+  }
+
+  private async sendEnvelope(envelope: SqsMessageEnvelope, delaySeconds?: number): Promise<string> {
     const command = new SendMessageCommand({
       QueueUrl: this.queueUrl,
       MessageBody: JSON.stringify(envelope),
+      DelaySeconds: delaySeconds,
       MessageAttributes: {
         stage: {
           DataType: 'String',

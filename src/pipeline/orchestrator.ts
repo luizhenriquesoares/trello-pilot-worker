@@ -1,13 +1,14 @@
 import { ImplementStage } from './stages/implement.js';
 import { ReviewStage, type ReviewContext } from './stages/review.js';
 import { QaStage, type QaContext } from './stages/qa.js';
-import { SqsProducer, type PipelineContext } from '../sqs/producer.js';
+import { SqsProducer, type PipelineContext, type SqsMessageEnvelope } from '../sqs/producer.js';
 import { TrelloApi } from '../trello/api.js';
 import { TrelloCommenter } from '../notifications/trello-commenter.js';
 import { SlackNotifier } from '../notifications/slack.js';
 import { JobTracker } from '../tracking/job-tracker.js';
 import { StreamBroadcaster } from '../server/websocket.js';
 import { DeployWatcher } from '../deploy/watcher.js';
+import { runClaude } from '../claude/headless-runner.js';
 import { PipelineStage } from '../shared/types/pipeline-stage.js';
 import type { WorkerEvent } from '../shared/types/worker-event.js';
 import type { BoardConfig } from '../config/types.js';
@@ -27,6 +28,7 @@ interface PendingDeploy {
 
 export class PipelineOrchestrator {
   readonly pendingDeploys = new Map<string, PendingDeploy>();
+  private readonly repoLocks = new Map<string, string>(); // repoUrl → cardId
 
   constructor(
     private readonly implementStage: ImplementStage,
@@ -43,6 +45,22 @@ export class PipelineOrchestrator {
   ) {}
 
   async processEvent(event: WorkerEvent, pipelineContext?: PipelineContext): Promise<void> {
+    // Repo lock: prevent concurrent tasks on the same repository
+    const lockHolder = this.repoLocks.get(event.repoUrl);
+    if (lockHolder && lockHolder !== event.cardId) {
+      console.log(
+        `[Orchestrator] Repo ${event.repoUrl} is locked by card ${lockHolder}. ` +
+        `Re-enqueueing card ${event.cardId} with 60s delay.`,
+      );
+      const envelope: SqsMessageEnvelope = { event, pipelineContext };
+      await this.sqsProducer.sendWithDelay(envelope, 60);
+      return;
+    }
+
+    // Acquire repo lock
+    this.repoLocks.set(event.repoUrl, event.cardId);
+    console.log(`[Orchestrator] Acquired repo lock for ${event.repoUrl} (card ${event.cardId})`);
+
     const stageMap: Record<PipelineStage, 'implement' | 'review' | 'qa'> = {
       [PipelineStage.IMPLEMENT]: 'implement',
       [PipelineStage.REVIEW]: 'review',
@@ -116,6 +134,12 @@ export class PipelineOrchestrator {
         console.error(`[Orchestrator] Failed to post error comment: ${(commentErr as Error).message}`);
       });
     } finally {
+      // Release repo lock
+      if (this.repoLocks.get(event.repoUrl) === event.cardId) {
+        this.repoLocks.delete(event.repoUrl);
+        console.log(`[Orchestrator] Released repo lock for ${event.repoUrl} (card ${event.cardId})`);
+      }
+
       // Cleanup /tmp repos to prevent disk overflow
       if (pipelineContext?.workDir) {
         try {
@@ -208,6 +232,13 @@ export class PipelineOrchestrator {
       console.error(`[Orchestrator] Failed to post summary: ${(err as Error).message}`);
     });
 
+    // Auto-update CLAUDE.md with any new patterns discovered during implementation
+    if (result.merged && context.workDir) {
+      await this.autoUpdateClaudeMd(context.workDir, event.repoUrl).catch((err) => {
+        console.warn(`[Orchestrator] CLAUDE.md auto-update failed (non-blocking): ${(err as Error).message}`);
+      });
+    }
+
     // Delegate to DeployWatcher: it will poll Railway and move to Done when deploy succeeds
     // If no Railway project configured, it moves to Done immediately
     if (this.deployWatcher) {
@@ -233,6 +264,71 @@ export class PipelineOrchestrator {
     }
 
     console.log(`[Orchestrator] QA complete for card ${event.cardId}. Merged: ${result.merged}. Cost: $${totalCost.toFixed(4)}`);
+  }
+
+  /**
+   * Run a lightweight Claude call to update CLAUDE.md with any new patterns
+   * discovered during the implementation. Non-blocking — failures are logged and swallowed.
+   */
+  private async autoUpdateClaudeMd(workDir: string, repoUrl: string): Promise<void> {
+    const CLAUDE_MD_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+    const CLAUDE_MD_MAX_BUDGET = 0.10;
+
+    // Clone fresh on main since the PR was already merged
+    const { mkdtemp } = await import('fs/promises');
+    const { join } = await import('path');
+    const tmpDir = await mkdtemp(join('/tmp', 'claude-md-'));
+
+    try {
+      const { spawn } = await import('child_process');
+
+      // Clone just the main branch (shallow) for the update
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn('git', ['clone', '--depth', '5', repoUrl, tmpDir], {
+          stdio: 'ignore',
+          env: { ...process.env },
+        });
+        proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`git clone failed (exit ${code})`)));
+        proc.on('error', reject);
+      });
+
+      const prompt = [
+        'Read the CLAUDE.md and the recent git diff (use `git log --oneline -5` and `git diff HEAD~1`).',
+        'If the implementation introduced new patterns, endpoints, components, or architectural changes',
+        'that should be documented, update CLAUDE.md.',
+        'If nothing significant changed, do nothing.',
+      ].join(' ');
+
+      console.log('[Orchestrator] Running CLAUDE.md auto-update...');
+      const result = await runClaude({
+        cwd: tmpDir,
+        prompt,
+        timeoutMs: CLAUDE_MD_TIMEOUT_MS,
+        maxBudgetUsd: CLAUDE_MD_MAX_BUDGET,
+      });
+
+      if (result.exitCode !== 0) {
+        console.warn(`[Orchestrator] CLAUDE.md update exited with code ${result.exitCode}`);
+        return;
+      }
+
+      // Check if CLAUDE.md was actually modified
+      const { execSync } = await import('child_process');
+      const diffOutput = execSync('git diff --name-only', { cwd: tmpDir, encoding: 'utf-8' }).trim();
+
+      if (diffOutput.includes('CLAUDE.md')) {
+        execSync('git add CLAUDE.md', { cwd: tmpDir });
+        execSync('git commit -m "docs: auto-update CLAUDE.md"', { cwd: tmpDir });
+        execSync('git push', { cwd: tmpDir });
+        console.log('[Orchestrator] CLAUDE.md updated and pushed successfully');
+      } else {
+        console.log('[Orchestrator] CLAUDE.md unchanged — no update needed');
+      }
+    } finally {
+      // Cleanup temp directory
+      const { rm } = await import('fs/promises');
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   /**
