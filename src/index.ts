@@ -17,6 +17,7 @@ import { loadBoardConfig } from './config/board-config.js';
 import { JobTracker } from './tracking/job-tracker.js';
 import { LogBuffer } from './tracking/log-buffer.js';
 import { StreamBroadcaster } from './server/websocket.js';
+import { DeployWatcher } from './deploy/watcher.js';
 
 // --- Globals ---
 
@@ -118,6 +119,12 @@ async function main(): Promise<void> {
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+
+  // Start deploy watcher (polls Railway for deploy status)
+  if (envConfig.railwayToken) {
+    const deployWatcher = new DeployWatcher(envConfig.railwayToken, boardConfig, orchestrator);
+    deployWatcher.start(30_000); // Check every 30s
+  }
 
   // Start SQS polling loop (only if SQS is configured)
   if (envConfig.sqsQueueUrl) {

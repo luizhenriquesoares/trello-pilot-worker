@@ -17,7 +17,16 @@ const NEXT_STAGE_MAP: Record<PipelineStage, PipelineStage | null> = {
   [PipelineStage.QA]: null,
 };
 
+interface PendingDeploy {
+  cardId: string;
+  projectName: string;
+  mergedAt: string;
+  totalCostUsd: number;
+}
+
 export class PipelineOrchestrator {
+  readonly pendingDeploys = new Map<string, PendingDeploy>();
+
   constructor(
     private readonly implementStage: ImplementStage,
     private readonly reviewStage: ReviewStage,
@@ -168,14 +177,9 @@ export class PipelineOrchestrator {
 
     const result = await this.qaStage.execute(event, qaContext);
 
-    // Always move card to done after QA completes (even if merge failed)
-    await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
-      console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
-    });
-
     const totalCost = context.cumulativeCostUsd + result.costUsd;
 
-    // Post final cost summary to Trello
+    // Post cost summary to Trello (card stays in QA until deploy succeeds)
     await this.commenter.postPipelineSummary(event.cardId, {
       merged: result.merged,
       totalCostUsd: totalCost,
@@ -184,11 +188,49 @@ export class PipelineOrchestrator {
       console.error(`[Orchestrator] Failed to post summary: ${(err as Error).message}`);
     });
 
-    // Notify Slack of completion
-    await this.slackNotifier.notifyComplete(event.cardId, result.merged, totalCost).catch(() => {
-      // Best-effort
+    // Comment: waiting for deploy
+    await this.trelloApi.addComment(event.cardId,
+      `**QA passed** — merged to main.\n\nAwaiting deployment to production. Card will move to **Done** automatically when deploy succeeds.`
+    ).catch(() => {});
+
+    // Store pending deploy info for the deploy watcher
+    this.pendingDeploys.set(event.cardId, {
+      cardId: event.cardId,
+      projectName: event.projectName || '',
+      mergedAt: new Date().toISOString(),
+      totalCostUsd: totalCost,
     });
 
-    console.log(`[Orchestrator] Pipeline complete for card ${event.cardId}. Merged: ${result.merged}. Total cost: $${totalCost.toFixed(4)}`);
+    // Notify Slack
+    await this.slackNotifier.notifyComplete(event.cardId, result.merged, totalCost).catch(() => {});
+
+    console.log(`[Orchestrator] QA complete for card ${event.cardId}. Merged: ${result.merged}. Waiting for deploy.`);
+  }
+
+  /**
+   * Called by deploy watcher when a deployment succeeds.
+   * Moves card from QA to Done and comments on Trello.
+   */
+  async confirmDeploy(cardId: string): Promise<boolean> {
+    const pending = this.pendingDeploys.get(cardId);
+    if (!pending) return false;
+
+    console.log(`[Orchestrator] Deploy confirmed for card ${cardId}. Moving to Done.`);
+
+    await this.trelloApi.moveCard(cardId, this.boardConfig.lists.done).catch((err) => {
+      console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
+    });
+
+    await this.trelloApi.addComment(cardId,
+      `**Deployed to production** :rocket:\n\nTotal pipeline cost: $${pending.totalCostUsd.toFixed(4)}\nTask **Done**.`
+    ).catch(() => {});
+
+    this.pendingDeploys.delete(cardId);
+    return true;
+  }
+
+  /** Get all cards waiting for deploy confirmation */
+  getPendingDeploys(): PendingDeploy[] {
+    return Array.from(this.pendingDeploys.values());
   }
 }
