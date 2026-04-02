@@ -1,4 +1,4 @@
-import { TrelloCard } from '../trello/types';
+import type { TrelloCard } from '../trello/types.js';
 
 export class PromptBuilder {
   private rules: string[] = [];
@@ -112,18 +112,30 @@ export class PromptBuilder {
     } else {
       sections.push('## Instructions (FEATURE / IMPROVEMENT)');
       sections.push('');
-      sections.push('### Step 1 — Understand the codebase');
+      sections.push('### Step 1 — Understand the codebase and the FULL rendering context');
       sections.push('- Read CLAUDE.md and relevant existing code before making changes');
       sections.push('- Understand current patterns, naming conventions, and architecture');
+      sections.push('- CRITICAL: Before modifying any component, trace WHERE and WHEN it is rendered:');
+      sections.push('  - Is the component conditionally rendered? (e.g., `if (x) return null` before your code)');
+      sections.push('  - Is there an early return that prevents your code from running?');
+      sections.push('  - On which PAGES/ROUTES does this component appear?');
+      sections.push('  - Are there MULTIPLE components doing similar things on different pages? (e.g., a chat on homepage vs a chat on inner pages)');
+      sections.push('- If the task targets a specific page (homepage, blog, etc.), verify your changes will execute ON THAT PAGE');
       sections.push('');
       sections.push('### Step 2 — Implement');
       sections.push('- Follow project rules and conventions strictly');
       sections.push('- Implement exactly what the task asks — no more, no less');
       sections.push('- Use existing patterns in the codebase as reference');
+      sections.push('- VERIFY: will your new code actually be EXECUTED in the target scenario?');
+      sections.push('  - Check for conditional rendering that might skip your code');
+      sections.push('  - Check if the parent component is even mounted on the target page');
+      sections.push('  - If a component returns null before your code, your code is DEAD CODE');
       sections.push('');
       sections.push('### Step 3 — Validate');
       sections.push('- Run `npx tsc --noEmit` to ensure no type errors');
       sections.push('- Verify all imports resolve correctly');
+      sections.push('- TRACE THE EXECUTION PATH: simulate a user going to the target page and verify your code runs');
+      sections.push('- Check: are there early returns, conditional renders, or route guards that prevent execution?');
       sections.push('');
       sections.push('### Step 4 — Commit');
       sections.push('- Commit with a clear message describing what was implemented');
@@ -181,6 +193,15 @@ export class PromptBuilder {
     sections.push('1. Run `git diff main...HEAD` to see ALL changes made in this branch');
     sections.push('2. Read every changed file carefully');
     sections.push('3. Analyze the changes against the criteria below:');
+    sections.push('');
+    sections.push('### Execution Path Verification (CRITICAL — check FIRST)');
+    sections.push('- For EVERY new function/component/hook added, trace the rendering chain:');
+    sections.push('  - Is the parent component conditionally rendered? (e.g., `if (x) return null`)');
+    sections.push('  - Are there early returns BEFORE the new code that prevent execution?');
+    sections.push('  - On which pages/routes does this code actually run?');
+    sections.push('  - If the task targets a specific page, does the code run ON THAT PAGE?');
+    sections.push('- If new code is placed inside a component that returns null for the target scenario → mark as CRITICAL');
+    sections.push('- Example: adding exit-intent to ChatWidget that does `if (isHomePage) return null` → code never runs on homepage');
     sections.push('');
     sections.push('### Bugs & Logic Errors');
     sections.push('- Race conditions, null/undefined access, off-by-one errors');
@@ -293,7 +314,16 @@ export class PromptBuilder {
     sections.push('- Verify the implementation addresses every requirement');
     sections.push('- Check edge cases are handled');
     sections.push('');
-    sections.push('### Step 4.5 — Root Cause Verification (for bug fixes)');
+    sections.push('### Step 4.5 — Execution Path Verification (CRITICAL)');
+    sections.push('- For every file changed, trace the RENDERING/EXECUTION chain:');
+    sections.push('  - Open the component that was modified');
+    sections.push('  - Check if there are conditional returns BEFORE the new code (e.g., `if (x) return null`)');
+    sections.push('  - Verify the component is actually MOUNTED on the page described in the task');
+    sections.push('  - If the task says "homepage popup" but the code is in a component that returns null on homepage → FAIL');
+    sections.push('- Simulate the user journey described in the task and verify each step works');
+    sections.push('- If code was added to a component that is NOT rendered in the target scenario → FAIL and fix it');
+    sections.push('');
+    sections.push('### Step 4.6 — Root Cause Verification (for bug fixes)');
     sections.push('- If this was a bug fix, verify the ROOT CAUSE is addressed');
     sections.push('- Check: does the fix actually solve the problem, or just add logging/error handling?');
     sections.push('- If the fix only added try/catch, logging, or error messages WITHOUT fixing the underlying issue → FAIL the QA');
@@ -322,13 +352,13 @@ export class PromptBuilder {
     return sections.join('\n');
   }
 
-  isBugTask(card: TrelloCard): boolean {
+  private isBugTask(card: TrelloCard): boolean {
     const text = `${card.name} ${card.desc || ''}`.toLowerCase();
     const bugKeywords = [
-      'bug', 'erro', 'error', 'fix', 'nao funciona', 'nao funciona',
-      'nao esta', 'nao esta', 'quebr', 'broken', 'crash', 'fail',
-      'problema', 'issue', 'defeito', 'nao consigo', 'nao consigo',
-      'nao chega', 'nao chega', 'sem funcionar', 'indisponiv', 'indisponiv',
+      'bug', 'erro', 'error', 'fix', 'não funciona', 'nao funciona',
+      'não está', 'nao esta', 'quebr', 'broken', 'crash', 'fail',
+      'problema', 'issue', 'defeito', 'não consigo', 'nao consigo',
+      'não chega', 'nao chega', 'sem funcionar', 'indisponív', 'indisponiv',
       'urgente', 'urgent',
     ];
     const hasBugLabel = card.labels?.some((l) =>
