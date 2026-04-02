@@ -70,7 +70,6 @@ export class RepoManager {
     const authUrl = this.buildAuthUrl(repoUrl);
     await this.execGit('/tmp', [
       'clone',
-      '--depth', '1',
       '--branch', baseBranch,
       authUrl,
       targetDir,
@@ -78,6 +77,19 @@ export class RepoManager {
   }
 
   async createBranch(cwd: string, branchName: string): Promise<void> {
+    // Delete remote branch if it exists (leftover from previous attempt)
+    try {
+      await this.execGit(cwd, ['push', 'origin', '--delete', branchName]);
+      console.log(`[Git] Deleted stale remote branch: ${branchName}`);
+    } catch {
+      // Branch doesn't exist remotely — that's fine
+    }
+    // Delete local branch if it exists
+    try {
+      await this.execGit(cwd, ['branch', '-D', branchName]);
+    } catch {
+      // Branch doesn't exist locally
+    }
     await this.execGit(cwd, ['checkout', '-b', branchName]);
   }
 
@@ -92,7 +104,13 @@ export class RepoManager {
   }
 
   async push(cwd: string, branchName: string): Promise<void> {
-    await this.execGit(cwd, ['push', '-u', 'origin', branchName]);
+    try {
+      await this.execGit(cwd, ['push', '-u', 'origin', branchName]);
+    } catch {
+      // Push rejected — force push (branch was recreated fresh)
+      console.log(`[Git] Push rejected, force pushing: ${branchName}`);
+      await this.execGit(cwd, ['push', '-u', '--force', 'origin', branchName]);
+    }
   }
 
   async createPr(
