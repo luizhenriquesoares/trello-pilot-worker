@@ -28,6 +28,16 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY package.json config.json ./
 
+# Create non-root user (Claude CLI refuses --dangerously-skip-permissions as root)
+RUN useradd -m -s /bin/bash pilot
+RUN git config --global user.email "trello-pilot@automation" \
+    && git config --global user.name "Trello Code Pilot"
+
+# Set ownership and switch to non-root
+RUN chown -R pilot:pilot /app /tmp
+USER pilot
+
+# Git config for the non-root user
 RUN git config --global user.email "trello-pilot@automation" \
     && git config --global user.name "Trello Code Pilot"
 
