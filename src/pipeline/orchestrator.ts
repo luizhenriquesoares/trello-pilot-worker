@@ -179,7 +179,12 @@ export class PipelineOrchestrator {
 
     const totalCost = context.cumulativeCostUsd + result.costUsd;
 
-    // Post cost summary to Trello (card stays in QA until deploy succeeds)
+    // Move card to Done immediately
+    await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
+      console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
+    });
+
+    // Post cost summary to Trello
     await this.commenter.postPipelineSummary(event.cardId, {
       merged: result.merged,
       totalCostUsd: totalCost,
@@ -188,23 +193,15 @@ export class PipelineOrchestrator {
       console.error(`[Orchestrator] Failed to post summary: ${(err as Error).message}`);
     });
 
-    // Comment: waiting for deploy
+    // Comment: done
     await this.trelloApi.addComment(event.cardId,
-      `**QA passed** — merged to main.\n\nAwaiting deployment to production. Card will move to **Done** automatically when deploy succeeds.`
+      `**Pipeline complete** — ${result.merged ? 'PR merged to main' : 'changes pushed'}.\n\nTotal cost: $${totalCost.toFixed(4)}\nTask **Done**.`
     ).catch(() => {});
-
-    // Store pending deploy info for the deploy watcher
-    this.pendingDeploys.set(event.cardId, {
-      cardId: event.cardId,
-      projectName: event.projectName || '',
-      mergedAt: new Date().toISOString(),
-      totalCostUsd: totalCost,
-    });
 
     // Notify Slack
     await this.slackNotifier.notifyComplete(event.cardId, result.merged, totalCost).catch(() => {});
 
-    console.log(`[Orchestrator] QA complete for card ${event.cardId}. Merged: ${result.merged}. Waiting for deploy.`);
+    console.log(`[Orchestrator] Pipeline complete for card ${event.cardId}. Merged: ${result.merged}. Cost: $${totalCost.toFixed(4)}`);
   }
 
   /**
