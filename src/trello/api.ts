@@ -115,6 +115,18 @@ export class TrelloApi {
     });
   }
 
+  async getCardComments(cardId: string): Promise<{ text: string; author: string; date: string }[]> {
+    const actions = await this.request<
+      { data: { text: string }; memberCreator: { fullName: string }; date: string }[]
+    >(`/cards/${cardId}/actions`, { filter: 'commentCard' });
+
+    return actions.map((action) => ({
+      text: action.data.text,
+      author: action.memberCreator.fullName,
+      date: action.date,
+    }));
+  }
+
   async createWebhook(
     callbackUrl: string,
     idModel: string,

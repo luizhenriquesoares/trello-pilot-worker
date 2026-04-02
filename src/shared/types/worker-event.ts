@@ -31,4 +31,10 @@ export interface WorkerEvent {
 
   /** Trello API credentials for card operations */
   trelloCredentials: TrelloCredentials;
+
+  /** Whether this card was reopened from Done (a retry of a previous implementation) */
+  isRetry?: boolean;
+
+  /** Stakeholder feedback from Trello comments explaining why the previous implementation failed */
+  retryFeedback?: string;
 }

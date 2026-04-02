@@ -58,7 +58,8 @@ export class PipelineOrchestrator {
       cardName = card.name;
     } catch { /* use cardId as fallback */ }
 
-    console.log(`[Orchestrator] Processing ${stageName} for: ${cardName}`);
+    const retryLabel = event.isRetry ? ' (RETRY)' : '';
+    console.log(`[Orchestrator] Processing ${stageName}${retryLabel} for: ${cardName}`);
 
     // Track job start
     const jobId = this.jobTracker?.start(event.cardId, cardName, event.projectName || 'Unknown', stageName);

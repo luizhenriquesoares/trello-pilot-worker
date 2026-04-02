@@ -60,9 +60,13 @@ export class ImplementStage {
       await this.commenter.postComplexityEstimate(card.id, estimate);
     }
 
-    // Build prompt and run claude headless
-    const prompt = this.promptBuilder.build(card);
-    console.log(`[Implement] Running Claude headless for card: ${card.name}`);
+    // Build prompt — use retry prompt if this is a reopened task
+    const prompt = event.isRetry && event.retryFeedback
+      ? this.promptBuilder.buildRetry(card, event.retryFeedback)
+      : this.promptBuilder.build(card);
+
+    const modeLabel = event.isRetry ? 'RETRY' : 'IMPLEMENT';
+    console.log(`[Implement] Running Claude headless (${modeLabel}) for card: ${card.name}`);
 
     const runResult = await runClaude({
       cwd: workDir,

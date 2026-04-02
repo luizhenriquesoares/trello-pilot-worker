@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import { SqsProducer } from '../sqs/producer.js';
+import { TrelloApi } from '../trello/api.js';
 import { verifyTrelloWebhookSignature } from '../trello/webhook-verifier.js';
 import { resolveProjectForList } from '../config/board-config.js';
 import { PipelineStage } from '../shared/types/pipeline-stage.js';
@@ -106,7 +107,8 @@ export class WebhookHandler {
       // Handle card moved to a project list (Todo list)
       if (actionType === CARD_MOVE_ACTION && action.data.listAfter) {
         const targetListId = action.data.listAfter.id;
-        await this.handleCardMoved(card, targetListId, action.data.board?.id);
+        const sourceListId = action.data.listBefore?.id;
+        await this.handleCardMoved(card, targetListId, sourceListId, action.data.board?.id);
         return;
       }
 
@@ -126,6 +128,7 @@ export class WebhookHandler {
   private async handleCardMoved(
     card: { id: string; name: string; idShort: number },
     targetListId: string,
+    sourceListId?: string,
     boardId?: string,
   ): Promise<void> {
     const project = resolveProjectForList(this.boardConfig, targetListId);
@@ -134,9 +137,19 @@ export class WebhookHandler {
       return;
     }
 
-    console.log(`[Webhook] Card "${card.name}" moved to project "${project.name}". Enqueueing IMPLEMENT.`);
+    // Detect reopen: card moved FROM Done back to a project list
+    const isRetry = sourceListId === this.boardConfig.lists.done;
 
-    const event = this.buildWorkerEvent(card.id, boardId, project);
+    let retryFeedback: string | undefined;
+    if (isRetry) {
+      console.log(`[Webhook] Card "${card.name}" reopened from Done → "${project.name}". Fetching feedback comments.`);
+      retryFeedback = await this.fetchRetryFeedback(card.id);
+    }
+
+    const modeLabel = isRetry ? 'RETRY' : 'IMPLEMENT';
+    console.log(`[Webhook] Card "${card.name}" moved to project "${project.name}". Enqueueing ${modeLabel}.`);
+
+    const event = this.buildWorkerEvent(card.id, boardId, project, isRetry, retryFeedback);
     const messageId = await this.sqsProducer.sendMessage(event);
     console.log(`[Webhook] SQS message sent: ${messageId}`);
   }
@@ -159,12 +172,36 @@ export class WebhookHandler {
     console.log(`[Webhook] SQS message sent: ${messageId}`);
   }
 
+  private async fetchRetryFeedback(cardId: string): Promise<string | undefined> {
+    try {
+      const trelloApi = new TrelloApi(this.trelloCredentials);
+      const comments = await trelloApi.getCardComments(cardId);
+
+      if (comments.length === 0) {
+        return 'No feedback comments found on the card. Review the task description and check what might be wrong.';
+      }
+
+      // Take the most recent comments (up to 10) — they likely contain the feedback
+      const recentComments = comments.slice(0, 10);
+      const formatted = recentComments
+        .map((c) => `**${c.author}** (${new Date(c.date).toLocaleString()}):\n${c.text}`)
+        .join('\n\n---\n\n');
+
+      return formatted;
+    } catch (err) {
+      console.error(`[Webhook] Failed to fetch retry feedback: ${(err as Error).message}`);
+      return 'Could not fetch feedback comments. Review the card on Trello for stakeholder feedback.';
+    }
+  }
+
   private buildWorkerEvent(
     cardId: string,
     boardId: string | undefined,
     project: { id: string; name: string; repoUrl: string; baseBranch: string; branchPrefix: string; rules?: string[] },
+    isRetry = false,
+    retryFeedback?: string,
   ): WorkerEvent {
-    return {
+    const event: WorkerEvent = {
       cardId,
       boardId: boardId ?? this.boardConfig.boardId,
       stage: PipelineStage.IMPLEMENT,
@@ -176,5 +213,12 @@ export class WebhookHandler {
       projectName: project.name,
       trelloCredentials: this.trelloCredentials,
     };
+
+    if (isRetry) {
+      event.isRetry = true;
+      event.retryFeedback = retryFeedback;
+    }
+
+    return event;
   }
 }
