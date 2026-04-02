@@ -168,10 +168,10 @@ export class PipelineOrchestrator {
 
     const result = await this.qaStage.execute(event, qaContext);
 
-    // Move card to done list
-    if (result.merged) {
-      await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done);
-    }
+    // Always move card to done after QA completes (even if merge failed)
+    await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
+      console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
+    });
 
     const totalCost = context.cumulativeCostUsd + result.costUsd;
 
