@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { createServer } from 'http';
 import { createApp } from './server/routes.js';
 import { WebhookHandler } from './server/webhook-handler.js';
 import { SqsConsumer } from './sqs/consumer.js';
@@ -87,12 +88,15 @@ async function main(): Promise<void> {
   );
   const app = createApp(webhookHandler, jobTracker, logBuffer);
 
-  const server = app.listen(envConfig.port, () => {
-    console.log(`[Worker] Express server listening on port ${envConfig.port}`);
-  });
+  // Create HTTP server (needed for both Express + WebSocket)
+  const server = createServer(app);
 
   // Attach WebSocket server for real-time streaming
   broadcaster.attach(server);
+
+  server.listen(envConfig.port, () => {
+    console.log(`[Worker] Express + WebSocket server listening on port ${envConfig.port}`);
+  });
 
   // Graceful shutdown
   const shutdown = async (): Promise<void> => {
