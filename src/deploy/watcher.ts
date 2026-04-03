@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import { TrelloApi } from '../trello/api.js';
 import type { BoardConfig } from '../config/types.js';
 
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+
 const POLL_INTERVAL_MS = 30_000; // 30 seconds
 const PENDING_FILE = '/tmp/trello-pilot-pending-deploys.json';
 const MAX_WAIT_MS = 15 * 60_000; // 15 minutes — if deploy doesn't complete, move to Done anyway
@@ -140,6 +142,12 @@ export class DeployWatcher {
       : `**Pipeline complete**\n\nMerged to main.\nTotal cost: $${totalCostUsd.toFixed(4)}\nTask **Done**.`;
     await this.trelloApi.addComment(cardId, msg).catch(() => {});
 
+    // Notify Slack
+    let cardName = cardId;
+    try { cardName = (await this.trelloApi.getCard(cardId)).name; } catch { /* use cardId */ }
+    const deployLabel = deployVerified ? 'Deploy verificado' : 'Merged to main';
+    this.notifySlack(`:white_check_mark: *Task Done* — ${cardName}\n>${deployLabel} | Custo: $${totalCostUsd.toFixed(4)}`).catch(() => {});
+
     // Clean up: delete remote feature branch
     if (branchName && branchName !== 'main' && branchName !== 'master') {
       await this.deleteRemoteBranch(repoUrl, branchName);
@@ -204,5 +212,16 @@ export class DeployWatcher {
 
   private savePending(p: Record<string, PendingDeploy>): void {
     fs.writeFileSync(PENDING_FILE, JSON.stringify(p, null, 2), 'utf-8');
+  }
+
+  private async notifySlack(text: string): Promise<void> {
+    if (!SLACK_WEBHOOK_URL) return;
+    try {
+      await fetch(SLACK_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+    } catch { /* non-blocking */ }
   }
 }

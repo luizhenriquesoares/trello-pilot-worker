@@ -273,6 +273,7 @@ export class PipelineOrchestrator {
       await this.trelloApi.addComment(event.cardId,
         `**Pipeline complete** — ${result.merged ? 'PR merged' : 'changes pushed'}.\nTotal cost: $${totalCost.toFixed(4)}\nTask **Done**.`
       ).catch(() => {});
+      this.slackNotifier.notifyComplete(cardName, result.merged, totalCost).catch(() => {});
     }
 
     console.log(`[Orchestrator] QA complete for card ${event.cardId}. Merged: ${result.merged}. Cost: $${totalCost.toFixed(4)}`);
