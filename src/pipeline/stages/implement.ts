@@ -255,21 +255,23 @@ export class ImplementStage {
         maxBudgetUsd: 0.05,
       });
 
-      // Strip code fences and extract JSON (handle multi-line)
+      // Strip code fences and stream-json event lines, then extract the response JSON
       const output = result.output
         .replace(/```json\s*/g, '')
         .replace(/```\s*/g, '');
-      const jsonMatch = output.match(/\{[\s\S]*?\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        // Validate required fields
-        if (parsed.size && parsed.estimatedMinutes !== undefined) {
-          return parsed;
-        }
-        console.warn('[Implement] Complexity JSON missing required fields:', JSON.stringify(parsed));
-      } else {
-        console.warn('[Implement] No JSON found in complexity output');
+
+      // Try to find a JSON object with the expected "size" field
+      // (avoids matching stream-json events like init/result)
+      const jsonObjects = output.match(/\{[^{}]*\}/g) || [];
+      for (const candidate of jsonObjects) {
+        try {
+          const parsed = JSON.parse(candidate);
+          if (parsed.size && parsed.estimatedMinutes !== undefined) {
+            return parsed;
+          }
+        } catch { /* not valid JSON, skip */ }
       }
+      console.warn('[Implement] No valid complexity JSON found in output');
     } catch (err) {
       console.warn(`[Implement] Complexity estimation failed: ${(err as Error).message}`);
     }
