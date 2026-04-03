@@ -82,6 +82,7 @@ export class PipelineOrchestrator {
     // Track job start
     const jobId = this.jobTracker?.start(event.cardId, cardName, event.projectName || 'Unknown', stageName);
     this.broadcaster?.notifyJobStart(event.cardId, cardName, stageName);
+    this.slackNotifier.notifyStageStart(cardName, event.stage).catch(() => {});
 
     // Create stream handler for real-time updates
     const onEvent = this.broadcaster?.createStreamHandler(event.cardId, cardName, stageName);
@@ -134,6 +135,7 @@ export class PipelineOrchestrator {
         this.jobTracker?.fail(jobId, errorMessage);
       }
       this.broadcaster?.notifyJobFail(event.cardId, cardName, stageName, errorMessage);
+      this.slackNotifier.notifyError(cardName, event.stage, errorMessage).catch(() => {});
 
       await this.commenter.postError(event.cardId, event.stage, errorMessage).catch((commentErr) => {
         console.error(`[Orchestrator] Failed to post error comment: ${(commentErr as Error).message}`);
@@ -236,6 +238,11 @@ export class PipelineOrchestrator {
     }).catch((err) => {
       console.error(`[Orchestrator] Failed to post summary: ${(err as Error).message}`);
     });
+
+    // Notify Slack on pipeline completion
+    let cardName = event.cardId;
+    try { cardName = (await this.trelloApi.getCard(event.cardId)).name; } catch { /* use cardId */ }
+    this.slackNotifier.notifyComplete(cardName, result.merged, totalCost).catch(() => {});
 
     // Auto-update CLAUDE.md with any new patterns discovered during implementation
     if (result.merged && context.workDir) {
