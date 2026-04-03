@@ -337,7 +337,7 @@ export class PipelineOrchestrator {
    * Run a lightweight Claude call to update CLAUDE.md with any new patterns
    * discovered during the implementation. Non-blocking — failures are logged and swallowed.
    */
-  private async autoUpdateClaudeMd(workDir: string, repoUrl: string): Promise<void> {
+  private async autoUpdateClaudeMd(_workDir: string, repoUrl: string): Promise<void> {
     const CLAUDE_MD_TIMEOUT_MS = 2 * 60 * 1000;
     const CLAUDE_MD_MAX_BUDGET = 0.10;
 
@@ -348,12 +348,26 @@ export class PipelineOrchestrator {
     try {
       const { spawn } = await import('child_process');
 
+      // Build authenticated URL for private repos
+      const ghToken = process.env.GH_TOKEN;
+      let cloneUrl = repoUrl;
+      if (ghToken) {
+        try {
+          const parsed = new URL(repoUrl);
+          parsed.username = 'x-access-token';
+          parsed.password = ghToken;
+          cloneUrl = parsed.toString();
+        } catch { /* use original URL */ }
+      }
+
       await new Promise<void>((resolve, reject) => {
-        const proc = spawn('git', ['clone', '--depth', '5', repoUrl, tmpDir], {
-          stdio: 'ignore',
+        const proc = spawn('git', ['clone', '--depth', '5', cloneUrl, tmpDir], {
+          stdio: ['ignore', 'ignore', 'pipe'],
           env: { ...process.env },
         });
-        proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`git clone failed (exit ${code})`)));
+        let stderr = '';
+        proc.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+        proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`git clone failed (exit ${code}): ${stderr.trim()}`)));
         proc.on('error', reject);
       });
 

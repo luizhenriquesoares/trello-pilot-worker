@@ -110,10 +110,15 @@ export class RepoManager {
   async push(cwd: string, branchName: string): Promise<void> {
     try {
       await this.execGit(cwd, ['push', '-u', 'origin', branchName]);
-    } catch {
-      // Push rejected — force push (branch was recreated fresh)
-      console.log(`[Git] Push rejected, force pushing: ${branchName}`);
-      await this.execGit(cwd, ['push', '-u', '--force', 'origin', branchName]);
+    } catch (err) {
+      const msg = (err as Error).message || '';
+      // Only force push on divergence/rejection, not on other errors
+      if (msg.includes('rejected') || msg.includes('non-fast-forward') || msg.includes('does not match any')) {
+        console.log(`[Git] Push rejected (${msg.substring(0, 100)}), force pushing: ${branchName}`);
+        await this.execGit(cwd, ['push', '-u', '--force', 'origin', branchName]);
+      } else {
+        throw err;
+      }
     }
   }
 

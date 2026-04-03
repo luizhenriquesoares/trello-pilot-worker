@@ -166,22 +166,31 @@ export class ImplementStage {
   }
 
   private async ensureKnowledge(workDir: string): Promise<void> {
-    let knowledge = this.knowledgeMgr.load(workDir);
-
-    if (knowledge) {
-      console.log(`[Implement] Knowledge loaded (${knowledge.techStack.join(', ')})`);
-    } else {
-      console.log('[Implement] Generating project knowledge (first run)...');
-      knowledge = await this.knowledgeMgr.generate(workDir, 'claude');
-      if (knowledge) {
-        console.log(`[Implement] Generated: ${knowledge.architecture}`);
-      } else {
-        console.log('[Implement] Could not generate knowledge — will scan normally');
-        return;
-      }
+    // Priority 1: Use existing CLAUDE.md from the repo (richest context, zero cost)
+    const claudeMdContext = this.knowledgeMgr.formatClaudeMdForPrompt(workDir);
+    if (claudeMdContext) {
+      console.log('[Implement] Using CLAUDE.md from repo as project knowledge');
+      this.promptBuilder.setKnowledge(claudeMdContext);
+      return;
     }
 
-    this.promptBuilder.setKnowledge(this.knowledgeMgr.formatForPrompt(knowledge));
+    // Priority 2: Load cached knowledge from previous generation
+    let knowledge = this.knowledgeMgr.load(workDir);
+    if (knowledge) {
+      console.log(`[Implement] Knowledge loaded (${knowledge.techStack.join(', ')})`);
+      this.promptBuilder.setKnowledge(this.knowledgeMgr.formatForPrompt(knowledge));
+      return;
+    }
+
+    // Priority 3: Generate knowledge via Claude CLI
+    console.log('[Implement] Generating project knowledge (first run)...');
+    knowledge = await this.knowledgeMgr.generate(workDir, 'claude');
+    if (knowledge) {
+      console.log(`[Implement] Generated: ${knowledge.architecture}`);
+      this.promptBuilder.setKnowledge(this.knowledgeMgr.formatForPrompt(knowledge));
+    } else {
+      console.log('[Implement] Could not generate knowledge — will scan normally');
+    }
   }
 
   private async estimateComplexity(
@@ -193,21 +202,34 @@ export class ImplementStage {
         'Analyze this task and estimate complexity.',
         `Task: "${card.name}".`,
         `Description: "${card.desc || 'none'}".`,
-        'Respond with ONLY valid JSON: {"size":"S|M|L|XL","reasoning":"brief reason","estimatedMinutes":N}',
+        'Respond with ONLY valid JSON (no markdown, no code fences):',
+        '{"size":"S|M|L|XL","reasoning":"brief reason","estimatedMinutes":N}',
       ].join(' ');
 
       const result = await runClaude({
         cwd: workDir,
         prompt,
+        timeoutMs: 2 * 60 * 1000, // 2 min max
         maxBudgetUsd: 0.05,
       });
 
-      const jsonMatch = result.output.match(/\{[^}]+\}/);
+      // Strip code fences and extract JSON (handle multi-line)
+      const output = result.output
+        .replace(/```json\s*/g, '')
+        .replace(/```\s*/g, '');
+      const jsonMatch = output.match(/\{[\s\S]*?\}/);
       if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+        const parsed = JSON.parse(jsonMatch[0]);
+        // Validate required fields
+        if (parsed.size && parsed.estimatedMinutes !== undefined) {
+          return parsed;
+        }
+        console.warn('[Implement] Complexity JSON missing required fields:', JSON.stringify(parsed));
+      } else {
+        console.warn('[Implement] No JSON found in complexity output');
       }
-    } catch {
-      console.warn('[Implement] Complexity estimation failed, skipping');
+    } catch (err) {
+      console.warn(`[Implement] Complexity estimation failed: ${(err as Error).message}`);
     }
     return null;
   }
