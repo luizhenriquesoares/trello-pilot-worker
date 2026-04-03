@@ -86,6 +86,53 @@ export class DeployWatcher {
     console.log('[DeployWatcher] Polling Railway every 30s');
     this.timer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
     this.poll(); // run immediately
+
+    // On startup, recover any cards stuck in QA after a worker restart
+    this.recoverStuckCards().catch((err) => {
+      console.warn(`[DeployWatcher] Recovery check failed: ${(err as Error).message}`);
+    });
+  }
+
+  /**
+   * On startup, check if any cards in the QA list have successful Railway deploys.
+   * This handles the case where the worker restarted and lost the pending deploys file.
+   */
+  private async recoverStuckCards(): Promise<void> {
+    const qaListId = this.boardConfig.lists.qa;
+    if (!qaListId) return;
+
+    try {
+      const cards = await this.trelloApi.getListCards(qaListId);
+      if (cards.length === 0) return;
+
+      console.log(`[DeployWatcher] Recovery: checking ${cards.length} card(s) in QA list`);
+
+      for (const card of cards) {
+        // Skip if already in pending (file survived restart)
+        const pending = this.loadPending();
+        if (pending[card.id]) continue;
+
+        // Check each project for recent successful deploy
+        for (const project of this.boardConfig.projectLists || []) {
+          if (!project.railwayProjectId) continue;
+
+          const deploy = await this.getLatestDeploy(project.railwayProjectId);
+          if (!deploy) continue;
+
+          // If deploy succeeded in the last 30 minutes, move card to Done
+          const deployAge = Date.now() - new Date(deploy.createdAt).getTime();
+          if ((deploy.status === 'SUCCESS' || deploy.status === 'COMPLETED') && deployAge < 30 * 60_000) {
+            console.log(`[DeployWatcher] Recovery: card "${card.name}" has successful deploy on "${project.name}" — moving to Done`);
+            await this.completeCard(
+              card.id, project.name, 0, '', '', card.name, true,
+            );
+            break; // only move once
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[DeployWatcher] Recovery scan failed: ${(err as Error).message}`);
+    }
   }
 
   stop(): void {

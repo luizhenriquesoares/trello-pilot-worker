@@ -75,6 +75,12 @@ export class TrelloApi {
     });
   }
 
+  async getListCards(listId: string): Promise<TrelloCard[]> {
+    return this.request<TrelloCard[]>(`/lists/${listId}/cards`, {
+      fields: 'name,idList',
+    });
+  }
+
   async getBoardCards(boardId: string): Promise<TrelloCard[]> {
     return this.request<TrelloCard[]>(`/boards/${boardId}/cards`, {
       fields: 'name,desc,url,shortUrl,idShort,idList,idBoard,labels,due,dueComplete,idMembers',
