@@ -14,6 +14,9 @@ export interface PipelineContext {
   prUrl: string;
   workDir: string;
   cumulativeCostUsd: number;
+  cardName?: string;
+  projectName?: string;
+  commitSummary?: string;
 }
 
 export class SqsProducer {

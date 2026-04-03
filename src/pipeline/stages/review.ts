@@ -60,7 +60,7 @@ export class ReviewStage {
     console.log(`[Review] Reviewing branch: ${branchName}, PR: ${prUrl || 'N/A'}`);
 
     // Comment on Trello: starting review
-    await this.commenter.postReviewStarted(card.id, branchName, prUrl);
+    await this.commenter.postReviewStarted(card.id, branchName, prUrl, event.projectName);
 
     // Build review prompt and run claude headless
     const prompt = this.promptBuilder.buildReview(card, branchName, prUrl);
@@ -86,6 +86,7 @@ export class ReviewStage {
       prUrl,
       durationMs,
       costUsd,
+      projectName: event.projectName,
     });
 
     return {

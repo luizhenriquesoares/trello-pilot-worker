@@ -15,6 +15,7 @@ export interface ImplementResult {
   workDir: string;
   costUsd: number;
   durationMs: number;
+  commitSummary: string;
 }
 
 export class ImplementStage {
@@ -104,6 +105,7 @@ export class ImplementStage {
           workDir,
           costUsd,
           durationMs: Date.now() - startTime,
+          commitSummary: '',
         };
       }
     }
@@ -143,6 +145,7 @@ export class ImplementStage {
       prUrl,
       durationMs,
       costUsd,
+      projectName: event.projectName,
     });
 
     return {
@@ -151,6 +154,7 @@ export class ImplementStage {
       workDir,
       costUsd,
       durationMs,
+      commitSummary: commitLog.trim(),
     };
   }
 

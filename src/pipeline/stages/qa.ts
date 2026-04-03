@@ -53,7 +53,7 @@ export class QaStage {
     const prUrl = context.prUrl || (await this.repoManager.getPrUrl(workDir, branchName)) || '';
 
     // Comment on Trello: starting QA
-    await this.commenter.postQaStarted(card.id, branchName, prUrl);
+    await this.commenter.postQaStarted(card.id, branchName, prUrl, event.projectName);
 
     // Build QA prompt and run claude headless
     console.log(`[QA] Running QA for branch: ${branchName}`);
@@ -91,6 +91,7 @@ export class QaStage {
       durationMs,
       costUsd,
       merged,
+      projectName: event.projectName,
     });
 
     // Cleanup temp directory

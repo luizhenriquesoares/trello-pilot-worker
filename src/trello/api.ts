@@ -115,6 +115,10 @@ export class TrelloApi {
     });
   }
 
+  async updateCheckItem(cardId: string, checkItemId: string, state: 'complete' | 'incomplete'): Promise<void> {
+    await this.put(`/cards/${cardId}/checkItem/${checkItemId}`, { state });
+  }
+
   async getCardComments(cardId: string): Promise<{ text: string; author: string; date: string }[]> {
     const actions = await this.request<
       { data: { text: string }; memberCreator: { fullName: string }; date: string }[]

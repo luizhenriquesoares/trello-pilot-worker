@@ -5,21 +5,22 @@ const SLACK_TIMEOUT_MS = 5000;
 export class SlackNotifier {
   constructor(private readonly webhookUrl: string | undefined) {}
 
-  async notifyError(cardId: string, stage: PipelineStage, errorMessage: string): Promise<void> {
+  async notifyError(cardName: string, stage: PipelineStage, errorMessage: string, projectName?: string): Promise<void> {
     if (!this.webhookUrl) return;
 
+    const project = projectName ? ` [${projectName}]` : '';
     const payload = {
-      text: ':x: *Pipeline Error*',
+      text: `:x: *Erro no pipeline*${project} — ${cardName}`,
       blocks: [
         {
           type: 'section',
           text: {
             type: 'mrkdwn',
             text: [
-              ':x: *Pipeline Error*',
+              `:x: *Erro no pipeline*${project}`,
+              `*Task:* ${cardName}`,
               `*Stage:* ${stage}`,
-              `*Card:* ${cardId}`,
-              `*Error:* ${errorMessage.substring(0, 500)}`,
+              `*Erro:* ${errorMessage.substring(0, 500)}`,
             ].join('\n'),
           },
         },
@@ -29,25 +30,51 @@ export class SlackNotifier {
     await this.post(payload);
   }
 
-  async notifyComplete(cardId: string, merged: boolean, totalCostUsd: number): Promise<void> {
+  async notifyComplete(
+    cardName: string,
+    merged: boolean,
+    totalCostUsd: number,
+    projectName?: string,
+    commitSummary?: string,
+    prUrl?: string,
+  ): Promise<void> {
     if (!this.webhookUrl) return;
 
+    const project = projectName ? ` [${projectName}]` : '';
     const emoji = merged ? ':white_check_mark:' : ':warning:';
-    const status = merged ? 'PR Merged' : 'Completed (merge pending)';
+    const status = merged ? 'PR Merged' : 'Merge pendente';
+
+    const textLines = [
+      `${emoji} *Task Concluida*${project}`,
+      `*Task:* ${cardName}`,
+      `*Status:* ${status}`,
+    ];
+
+    if (commitSummary) {
+      const commits = commitSummary
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .slice(0, 5);
+      textLines.push(`*O que foi feito:*`);
+      for (const c of commits) {
+        textLines.push(`> ${c}`);
+      }
+    }
+
+    if (prUrl) {
+      textLines.push(`*PR:* ${prUrl}`);
+    }
+    textLines.push(`*Custo:* $${totalCostUsd.toFixed(4)}`);
 
     const payload = {
-      text: `${emoji} Pipeline complete for ${cardId}`,
+      text: `${emoji} Task Concluida${project} — ${cardName}`,
       blocks: [
         {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: [
-              `${emoji} *Pipeline Complete*`,
-              `*Card:* ${cardId}`,
-              `*Status:* ${status}`,
-              `*Total Cost:* $${totalCostUsd.toFixed(4)}`,
-            ].join('\n'),
+            text: textLines.join('\n'),
           },
         },
       ],
@@ -56,11 +83,12 @@ export class SlackNotifier {
     await this.post(payload);
   }
 
-  async notifyStageStart(cardId: string, stage: PipelineStage): Promise<void> {
+  async notifyStageStart(cardName: string, stage: PipelineStage, projectName?: string): Promise<void> {
     if (!this.webhookUrl) return;
 
+    const project = projectName ? ` [${projectName}]` : '';
     const payload = {
-      text: `:gear: Starting ${stage} for card ${cardId}`,
+      text: `:gear: ${stage}${project} — ${cardName}`,
     };
 
     await this.post(payload);

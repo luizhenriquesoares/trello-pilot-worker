@@ -68,43 +68,61 @@ export class PipelineOrchestrator {
     };
 
     const stageName = stageMap[event.stage];
+    const projectName = event.projectName || 'Unknown';
 
     // Fetch card name for tracking
-    let cardName = event.cardId;
+    let cardName = pipelineContext?.cardName || event.cardId;
     try {
       const card = await this.trelloApi.getCard(event.cardId);
       cardName = card.name;
-    } catch { /* use cardId as fallback */ }
+    } catch { /* use fallback */ }
 
     const retryLabel = event.isRetry ? ' (RETRY)' : '';
-    console.log(`[Orchestrator] Processing ${stageName}${retryLabel} for: ${cardName}`);
+    console.log(`[Orchestrator] Processing ${stageName}${retryLabel} for: ${cardName} [${projectName}]`);
+
+    // Guard: for IMPLEMENT stage, verify the card is still in the expected project list.
+    // This prevents stale SQS messages from running (e.g. card moved between project lists).
+    if (event.stage === PipelineStage.IMPLEMENT && event.originListId) {
+      try {
+        const card = await this.trelloApi.getCard(event.cardId);
+        if (card.idList !== event.originListId) {
+          console.log(
+            `[Orchestrator] Card ${event.cardId} is no longer in origin list ${event.originListId} ` +
+            `(current list: ${card.idList}). Skipping stale IMPLEMENT for ${event.repoUrl}.`,
+          );
+          return;
+        }
+      } catch (err) {
+        console.warn(`[Orchestrator] Failed to verify card list (proceeding anyway): ${(err as Error).message}`);
+      }
+    }
 
     // Track job start
-    const jobId = this.jobTracker?.start(event.cardId, cardName, event.projectName || 'Unknown', stageName);
+    const jobId = this.jobTracker?.start(event.cardId, cardName, projectName, stageName);
     this.broadcaster?.notifyJobStart(event.cardId, cardName, stageName);
-    this.slackNotifier.notifyStageStart(cardName, event.stage).catch(() => {});
+    this.slackNotifier.notifyStageStart(cardName, event.stage, projectName).catch(() => {});
 
     // Create stream handler for real-time updates
     const onEvent = this.broadcaster?.createStreamHandler(event.cardId, cardName, stageName);
 
     try {
-      // Timeout per stage: implement gets more time (complex tasks), review/qa are shorter
+      // Timeout per stage
       const STAGE_TIMEOUTS: Record<string, number> = {
-        implement: 40 * 60 * 1000, // 40 minutes
-        review: 15 * 60 * 1000,    // 15 minutes
-        qa: 20 * 60 * 1000,        // 20 minutes
+        implement: 40 * 60 * 1000,
+        review: 15 * 60 * 1000,
+        qa: 20 * 60 * 1000,
       };
       const STAGE_TIMEOUT_MS = STAGE_TIMEOUTS[stageName] || 30 * 60 * 1000;
       const stagePromise = (async () => {
         switch (event.stage) {
           case PipelineStage.IMPLEMENT:
-            await this.handleImplement(event, onEvent);
+            await this.handleImplement(event, cardName, onEvent);
             break;
           case PipelineStage.REVIEW:
-            await this.handleReview(event, pipelineContext, onEvent);
+            await this.handleReview(event, cardName, pipelineContext, onEvent);
             break;
           case PipelineStage.QA:
-            await this.handleQa(event, pipelineContext, onEvent);
+            await this.handleQa(event, cardName, pipelineContext, onEvent);
             break;
           default: {
             const exhaustiveCheck: never = event.stage;
@@ -114,7 +132,7 @@ export class PipelineOrchestrator {
       })();
 
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Stage ${stageName} timed out after 20 minutes`)), STAGE_TIMEOUT_MS),
+        setTimeout(() => reject(new Error(`Stage ${stageName} timed out after ${STAGE_TIMEOUTS[stageName]! / 60_000}min`)), STAGE_TIMEOUT_MS),
       );
 
       await Promise.race([stagePromise, timeoutPromise]);
@@ -135,9 +153,9 @@ export class PipelineOrchestrator {
         this.jobTracker?.fail(jobId, errorMessage);
       }
       this.broadcaster?.notifyJobFail(event.cardId, cardName, stageName, errorMessage);
-      this.slackNotifier.notifyError(cardName, event.stage, errorMessage).catch(() => {});
+      this.slackNotifier.notifyError(cardName, event.stage, errorMessage, projectName).catch(() => {});
 
-      await this.commenter.postError(event.cardId, event.stage, errorMessage).catch((commentErr) => {
+      await this.commenter.postError(event.cardId, event.stage, errorMessage, projectName).catch((commentErr) => {
         console.error(`[Orchestrator] Failed to post error comment: ${(commentErr as Error).message}`);
       });
     } finally {
@@ -158,7 +176,11 @@ export class PipelineOrchestrator {
     }
   }
 
-  private async handleImplement(event: WorkerEvent, onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void): Promise<void> {
+  private async handleImplement(
+    event: WorkerEvent,
+    cardName: string,
+    onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void,
+  ): Promise<void> {
     // Move card to doing list
     await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.doing);
 
@@ -176,6 +198,9 @@ export class PipelineOrchestrator {
         prUrl: result.prUrl,
         workDir: result.workDir,
         cumulativeCostUsd: result.costUsd,
+        cardName,
+        projectName: event.projectName,
+        commitSummary: result.commitSummary,
       };
 
       await this.sqsProducer.sendWithContext(nextEvent, context);
@@ -183,7 +208,12 @@ export class PipelineOrchestrator {
     }
   }
 
-  private async handleReview(event: WorkerEvent, context?: PipelineContext): Promise<void> {
+  private async handleReview(
+    event: WorkerEvent,
+    cardName: string,
+    context?: PipelineContext,
+    _onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void,
+  ): Promise<void> {
     if (!context) {
       throw new Error('Review stage requires pipeline context (branchName, workDir) from implement stage');
     }
@@ -199,7 +229,7 @@ export class PipelineOrchestrator {
     // Move card to QA list
     await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.qa);
 
-    // Enqueue next stage (qa)
+    // Enqueue next stage (qa) — carry forward cardName, projectName, commitSummary
     const nextStage = NEXT_STAGE_MAP[PipelineStage.REVIEW];
     if (nextStage) {
       const nextEvent: WorkerEvent = { ...event, stage: nextStage };
@@ -208,6 +238,9 @@ export class PipelineOrchestrator {
         prUrl: result.prUrl,
         workDir: result.workDir,
         cumulativeCostUsd: context.cumulativeCostUsd + result.costUsd,
+        cardName,
+        projectName: context.projectName,
+        commitSummary: context.commitSummary,
       };
 
       await this.sqsProducer.sendWithContext(nextEvent, nextContext);
@@ -215,7 +248,12 @@ export class PipelineOrchestrator {
     }
   }
 
-  private async handleQa(event: WorkerEvent, context?: PipelineContext): Promise<void> {
+  private async handleQa(
+    event: WorkerEvent,
+    cardName: string,
+    context?: PipelineContext,
+    _onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void,
+  ): Promise<void> {
     if (!context) {
       throw new Error('QA stage requires pipeline context (branchName, workDir) from review stage');
     }
@@ -229,20 +267,12 @@ export class PipelineOrchestrator {
     const result = await this.qaStage.execute(event, qaContext);
 
     const totalCost = context.cumulativeCostUsd + result.costUsd;
+    const projectName = event.projectName || context.projectName || 'Unknown';
 
-    // Post cost summary to Trello
-    await this.commenter.postPipelineSummary(event.cardId, {
-      merged: result.merged,
-      totalCostUsd: totalCost,
-      totalDurationMs: result.durationMs,
-    }).catch((err) => {
-      console.error(`[Orchestrator] Failed to post summary: ${(err as Error).message}`);
+    // Mark all checklist items as complete on Trello
+    await this.markChecklistsComplete(event.cardId).catch((err) => {
+      console.warn(`[Orchestrator] Failed to mark checklists: ${(err as Error).message}`);
     });
-
-    // Notify Slack on pipeline completion
-    let cardName = event.cardId;
-    try { cardName = (await this.trelloApi.getCard(event.cardId)).name; } catch { /* use cardId */ }
-    this.slackNotifier.notifyComplete(cardName, result.merged, totalCost).catch(() => {});
 
     // Auto-update CLAUDE.md with any new patterns discovered during implementation
     if (result.merged && context.workDir) {
@@ -251,32 +281,56 @@ export class PipelineOrchestrator {
       });
     }
 
-    // Delegate to DeployWatcher: it will poll Railway and move to Done when deploy succeeds
-    // If no Railway project configured, it moves to Done immediately
+    // Delegate to DeployWatcher (or move to Done immediately)
     if (this.deployWatcher) {
-      await this.trelloApi.addComment(event.cardId,
-        `**QA passed** — ${result.merged ? 'PR merged to main' : 'changes pushed'}.\n\nWatching Railway deploy... Card moves to Done when deploy succeeds.`
-      ).catch(() => {});
-
       this.deployWatcher.addPending(
         event.cardId,
-        event.projectName || '',
+        projectName,
         totalCost,
         context.branchName,
         event.repoUrl,
+        cardName,
+        context.commitSummary,
+        context.prUrl,
+        result.durationMs,
       );
     } else {
-      // No deploy watcher — move to Done immediately
+      // No deploy watcher — move to Done immediately with summary
       await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
         console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
       });
-      await this.trelloApi.addComment(event.cardId,
-        `**Pipeline complete** — ${result.merged ? 'PR merged' : 'changes pushed'}.\nTotal cost: $${totalCost.toFixed(4)}\nTask **Done**.`
+
+      await this.commenter.postDoneSummary(event.cardId, {
+        merged: result.merged,
+        totalCostUsd: totalCost,
+        totalDurationMs: result.durationMs,
+        projectName,
+        commitSummary: context.commitSummary,
+        prUrl: context.prUrl,
+        cardName,
+      });
+
+      this.slackNotifier.notifyComplete(
+        cardName, result.merged, totalCost, projectName, context.commitSummary, context.prUrl,
       ).catch(() => {});
-      this.slackNotifier.notifyComplete(cardName, result.merged, totalCost).catch(() => {});
     }
 
     console.log(`[Orchestrator] QA complete for card ${event.cardId}. Merged: ${result.merged}. Cost: $${totalCost.toFixed(4)}`);
+  }
+
+  /** Mark all checklist items as complete on the Trello card */
+  private async markChecklistsComplete(cardId: string): Promise<void> {
+    const checklists = await this.trelloApi.getCardChecklists(cardId);
+    for (const checklist of checklists) {
+      for (const item of checklist.checkItems) {
+        if (item.state !== 'complete') {
+          await this.trelloApi.updateCheckItem(cardId, item.id, 'complete');
+        }
+      }
+    }
+    if (checklists.length > 0) {
+      console.log(`[Orchestrator] Marked all checklist items as complete for card ${cardId}`);
+    }
   }
 
   /**
@@ -284,10 +338,9 @@ export class PipelineOrchestrator {
    * discovered during the implementation. Non-blocking — failures are logged and swallowed.
    */
   private async autoUpdateClaudeMd(workDir: string, repoUrl: string): Promise<void> {
-    const CLAUDE_MD_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+    const CLAUDE_MD_TIMEOUT_MS = 2 * 60 * 1000;
     const CLAUDE_MD_MAX_BUDGET = 0.10;
 
-    // Clone fresh on main since the PR was already merged
     const { mkdtemp } = await import('fs/promises');
     const { join } = await import('path');
     const tmpDir = await mkdtemp(join('/tmp', 'claude-md-'));
@@ -295,7 +348,6 @@ export class PipelineOrchestrator {
     try {
       const { spawn } = await import('child_process');
 
-      // Clone just the main branch (shallow) for the update
       await new Promise<void>((resolve, reject) => {
         const proc = spawn('git', ['clone', '--depth', '5', repoUrl, tmpDir], {
           stdio: 'ignore',
@@ -325,7 +377,6 @@ export class PipelineOrchestrator {
         return;
       }
 
-      // Check if CLAUDE.md was actually modified
       const { execSync } = await import('child_process');
       const diffOutput = execSync('git diff --name-only', { cwd: tmpDir, encoding: 'utf-8' }).trim();
 
@@ -338,7 +389,6 @@ export class PipelineOrchestrator {
         console.log('[Orchestrator] CLAUDE.md unchanged — no update needed');
       }
     } finally {
-      // Cleanup temp directory
       const { rm } = await import('fs/promises');
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }

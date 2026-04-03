@@ -67,7 +67,7 @@ async function main(): Promise<void> {
 
   // Deploy watcher — polls Railway API to confirm deploys before moving cards to Done
   const deployWatcher = envConfig.railwayToken
-    ? new DeployWatcher(trelloApi, boardConfig, envConfig.railwayToken)
+    ? new DeployWatcher(trelloApi, boardConfig, envConfig.railwayToken, commenter)
     : undefined;
 
   if (!deployWatcher) {
@@ -130,10 +130,9 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  // Start deploy watcher (polls Railway for deploy status)
-  if (envConfig.railwayToken) {
-    const deployWatcher = new DeployWatcher(envConfig.railwayToken, boardConfig, orchestrator);
-    deployWatcher.start(30_000); // Check every 30s
+  // Start deploy watcher polling (if Railway is configured and not auto-started from pending file)
+  if (deployWatcher) {
+    deployWatcher.start();
   }
 
   // Start SQS polling loop (only if SQS is configured)

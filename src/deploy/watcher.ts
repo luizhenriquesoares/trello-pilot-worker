@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import { TrelloApi } from '../trello/api.js';
+import { TrelloCommenter } from '../notifications/trello-commenter.js';
 import type { BoardConfig } from '../config/types.js';
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
@@ -16,6 +17,10 @@ interface PendingDeploy {
   repoUrl: string;
   mergedAt: string;
   totalCostUsd: number;
+  cardName: string;
+  commitSummary?: string;
+  prUrl?: string;
+  totalDurationMs?: number;
 }
 
 interface RailwayDeployment {
@@ -32,6 +37,7 @@ export class DeployWatcher {
     private readonly trelloApi: TrelloApi,
     private readonly boardConfig: BoardConfig,
     private readonly railwayToken: string,
+    private readonly commenter?: TrelloCommenter,
   ) {
     // Resume watching on startup if there are pending deploys
     const pending = this.loadPending();
@@ -42,19 +48,33 @@ export class DeployWatcher {
   }
 
   /** Add a card to watch for deploy after QA merge */
-  addPending(cardId: string, projectName: string, totalCostUsd: number, branchName: string, repoUrl: string): void {
+  addPending(
+    cardId: string,
+    projectName: string,
+    totalCostUsd: number,
+    branchName: string,
+    repoUrl: string,
+    cardName: string,
+    commitSummary?: string,
+    prUrl?: string,
+    totalDurationMs?: number,
+  ): void {
     const project = this.boardConfig.projectLists?.find((p) => p.name === projectName);
-    const railwayProjectId = (project as Record<string, unknown>)?.railwayProjectId as string | undefined;
+    const railwayProjectId = project?.railwayProjectId;
 
     if (!railwayProjectId) {
       // No Railway project configured — move to Done immediately
       console.log(`[DeployWatcher] No railwayProjectId for "${projectName}" — moving to Done immediately`);
-      this.completeCard(cardId, totalCostUsd, branchName, repoUrl, false);
+      this.completeCard(cardId, projectName, totalCostUsd, branchName, repoUrl, cardName, false, commitSummary, prUrl, totalDurationMs);
       return;
     }
 
     const pending = this.loadPending();
-    pending[cardId] = { cardId, projectName, railwayProjectId, branchName, repoUrl, mergedAt: new Date().toISOString(), totalCostUsd };
+    pending[cardId] = {
+      cardId, projectName, railwayProjectId, branchName, repoUrl,
+      mergedAt: new Date().toISOString(), totalCostUsd,
+      cardName, commitSummary, prUrl, totalDurationMs,
+    };
     this.savePending(pending);
 
     console.log(`[DeployWatcher] Watching deploy for "${projectName}" (card ${cardId})`);
@@ -88,7 +108,10 @@ export class DeployWatcher {
           const waitMs = Date.now() - new Date(entry.mergedAt).getTime();
           if (waitMs > MAX_WAIT_MS) {
             console.log(`[DeployWatcher] Timeout (${Math.round(waitMs / 60_000)}min) for "${entry.projectName}" — moving to Done`);
-            await this.completeCard(cardId, entry.totalCostUsd, entry.branchName, entry.repoUrl, false);
+            await this.completeCard(
+              cardId, entry.projectName, entry.totalCostUsd, entry.branchName, entry.repoUrl,
+              entry.cardName, false, entry.commitSummary, entry.prUrl, entry.totalDurationMs,
+            );
             delete pending[cardId];
             this.savePending(pending);
             continue;
@@ -109,13 +132,16 @@ export class DeployWatcher {
 
           if (deploy.status === 'SUCCESS' || deploy.status === 'COMPLETED') {
             console.log(`[DeployWatcher] Deploy SUCCESS for "${entry.projectName}"`);
-            await this.completeCard(cardId, entry.totalCostUsd, entry.branchName, entry.repoUrl, true);
+            await this.completeCard(
+              cardId, entry.projectName, entry.totalCostUsd, entry.branchName, entry.repoUrl,
+              entry.cardName, true, entry.commitSummary, entry.prUrl, entry.totalDurationMs,
+            );
             delete pending[cardId];
             this.savePending(pending);
           } else if (deploy.status === 'FAILED' || deploy.status === 'CRASHED') {
             console.log(`[DeployWatcher] Deploy FAILED for "${entry.projectName}"`);
             await this.trelloApi.addComment(cardId,
-              `**Deploy failed** on Railway\n\nProject: ${entry.projectName}\nStatus: ${deploy.status}\n\nCard stays in QA. Fix and re-deploy.`
+              `**Deploy falhou** [${entry.projectName}]\n\nStatus: ${deploy.status}\nCard permanece em QA. Corrija e re-deploy.`
             ).catch(() => {});
             delete pending[cardId];
             this.savePending(pending);
@@ -130,23 +156,46 @@ export class DeployWatcher {
     }
   }
 
-  private async completeCard(cardId: string, totalCostUsd: number, branchName: string, repoUrl: string, deployVerified: boolean): Promise<void> {
+  private async completeCard(
+    cardId: string,
+    projectName: string,
+    totalCostUsd: number,
+    branchName: string,
+    repoUrl: string,
+    cardName: string,
+    deployVerified: boolean,
+    commitSummary?: string,
+    prUrl?: string,
+    totalDurationMs?: number,
+  ): Promise<void> {
     // Move card to Done
     await this.trelloApi.moveCard(cardId, this.boardConfig.lists.done).catch((err) => {
       console.error(`[DeployWatcher] Move to Done failed: ${(err as Error).message}`);
     });
 
-    // Comment
-    const msg = deployVerified
-      ? `**Deployed to production**\n\nDeploy verified via Railway.\nTotal cost: $${totalCostUsd.toFixed(4)}\nTask **Done**.`
-      : `**Pipeline complete**\n\nMerged to main.\nTotal cost: $${totalCostUsd.toFixed(4)}\nTask **Done**.`;
-    await this.trelloApi.addComment(cardId, msg).catch(() => {});
+    // Post rich summary comment via TrelloCommenter (or fallback to simple comment)
+    if (this.commenter) {
+      await this.commenter.postDoneSummary(cardId, {
+        merged: true,
+        totalCostUsd,
+        totalDurationMs: totalDurationMs || 0,
+        projectName,
+        commitSummary,
+        prUrl,
+        cardName,
+      });
+    } else {
+      const deployLabel = deployVerified ? 'Deploy verificado via Railway.' : 'Merged para main.';
+      const msg = `**Task Concluida** [${projectName}]\n\n${deployLabel}\nCusto: $${totalCostUsd.toFixed(4)}`;
+      await this.trelloApi.addComment(cardId, msg).catch(() => {});
+    }
 
     // Notify Slack
-    let cardName = cardId;
-    try { cardName = (await this.trelloApi.getCard(cardId)).name; } catch { /* use cardId */ }
     const deployLabel = deployVerified ? 'Deploy verificado' : 'Merged to main';
-    this.notifySlack(`:white_check_mark: *Task Done* — ${cardName}\n>${deployLabel} | Custo: $${totalCostUsd.toFixed(4)}`).catch(() => {});
+    this.notifySlack(
+      `:white_check_mark: *Task Concluida* [${projectName}] — ${cardName}\n>${deployLabel} | Custo: $${totalCostUsd.toFixed(4)}`
+      + (prUrl ? `\n>${prUrl}` : ''),
+    ).catch(() => {});
 
     // Clean up: delete remote feature branch
     if (branchName && branchName !== 'main' && branchName !== 'master') {
@@ -157,7 +206,6 @@ export class DeployWatcher {
   /** Delete remote feature branch to keep repo clean */
   private async deleteRemoteBranch(repoUrl: string, branchName: string): Promise<void> {
     try {
-      // Extract owner/repo from URL
       const match = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
       if (!match) return;
       const [, owner, repo] = match;

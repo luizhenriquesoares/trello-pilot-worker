@@ -6,6 +6,7 @@ interface StageCompleteData {
   prUrl: string;
   durationMs: number;
   costUsd: number;
+  projectName?: string;
 }
 
 interface QaCompleteData extends StageCompleteData {
@@ -16,6 +17,10 @@ interface PipelineSummaryData {
   merged: boolean;
   totalCostUsd: number;
   totalDurationMs: number;
+  projectName?: string;
+  commitSummary?: string;
+  prUrl?: string;
+  cardName?: string;
 }
 
 interface ComplexityEstimate {
@@ -28,114 +33,110 @@ export class TrelloCommenter {
   constructor(private readonly trelloApi: TrelloApi) {}
 
   async postComplexityEstimate(cardId: string, estimate: ComplexityEstimate): Promise<void> {
-    const comment = [
-      `**Complexity Estimate: ${estimate.size}** (~${estimate.estimatedMinutes}min)`,
-      estimate.reasoning,
-    ].join('\n');
-
+    const comment = `**Complexidade: ${estimate.size}** (~${estimate.estimatedMinutes}min) — ${estimate.reasoning}`;
     await this.safeComment(cardId, comment);
   }
 
   async postImplementComplete(cardId: string, data: StageCompleteData): Promise<void> {
     const durationMin = Math.round(data.durationMs / 60_000);
+    const project = data.projectName ? ` [${data.projectName}]` : '';
     const comment = [
-      `**Implementation complete** (${durationMin}min | $${data.costUsd.toFixed(4)})`,
-      '',
-      `Branch: \`${data.branchName}\``,
-      data.prUrl ? `PR: ${data.prUrl}` : '',
-      '',
-      'Moving to **Review** for code analysis.',
-    ].filter(Boolean).join('\n');
+      `**Implementacao concluida**${project} (${durationMin}min | $${data.costUsd.toFixed(4)})`,
+      data.prUrl ? `PR: ${data.prUrl}` : `Branch: \`${data.branchName}\``,
+      'Seguindo para **Code Review**.',
+    ].join('\n');
 
     await this.safeComment(cardId, comment);
   }
 
-  async postReviewStarted(cardId: string, branchName: string, prUrl: string): Promise<void> {
+  async postReviewStarted(cardId: string, branchName: string, prUrl: string, projectName?: string): Promise<void> {
+    const project = projectName ? ` [${projectName}]` : '';
     const comment = [
-      '**Code Review started**',
-      '',
-      `Branch: \`${branchName}\``,
-      prUrl ? `PR: ${prUrl}` : '',
-      '',
-      'Analyzing code changes for bugs, security, and project rules compliance...',
-    ].filter(Boolean).join('\n');
+      `**Code Review iniciado**${project}`,
+      prUrl ? `PR: ${prUrl}` : `Branch: \`${branchName}\``,
+    ].join('\n');
 
     await this.safeComment(cardId, comment);
   }
 
   async postReviewComplete(cardId: string, data: StageCompleteData): Promise<void> {
     const durationMin = Math.round(data.durationMs / 60_000);
+    const project = data.projectName ? ` [${data.projectName}]` : '';
     const comment = [
-      `**Code Review complete** (${durationMin}min | $${data.costUsd.toFixed(4)})`,
-      '',
-      `Branch: \`${data.branchName}\``,
-      'Reviewed for: bugs, security, SOLID, typing, project rules.',
-      'Any fixes were committed and pushed.',
-      data.prUrl ? `PR: ${data.prUrl}` : '',
-      '',
-      'Moving to **QA** for testing and validation.',
-    ].filter(Boolean).join('\n');
+      `**Code Review concluido**${project} (${durationMin}min | $${data.costUsd.toFixed(4)})`,
+      'Seguindo para **QA**.',
+    ].join('\n');
 
     await this.safeComment(cardId, comment);
   }
 
-  async postQaStarted(cardId: string, branchName: string, prUrl: string): Promise<void> {
+  async postQaStarted(cardId: string, branchName: string, prUrl: string, projectName?: string): Promise<void> {
+    const project = projectName ? ` [${projectName}]` : '';
     const comment = [
-      '**QA started**',
-      '',
-      `Branch: \`${branchName}\``,
-      prUrl ? `PR: ${prUrl}` : '',
-      '',
-      'Running type checks, tests, lint, and validating implementation against requirements...',
-    ].filter(Boolean).join('\n');
+      `**QA iniciado**${project}`,
+      prUrl ? `PR: ${prUrl}` : `Branch: \`${branchName}\``,
+    ].join('\n');
 
     await this.safeComment(cardId, comment);
   }
 
   async postQaComplete(cardId: string, data: QaCompleteData): Promise<void> {
     const durationMin = Math.round(data.durationMs / 60_000);
-    const mergeStatus = data.merged
-      ? 'PR merged to main via squash merge.'
-      : 'Changes pushed. Manual merge may be needed.';
+    const project = data.projectName ? ` [${data.projectName}]` : '';
+    const mergeStatus = data.merged ? 'PR merged para main.' : 'Merge manual necessario.';
 
     const comment = [
-      `**QA complete** (${durationMin}min | $${data.costUsd.toFixed(4)})`,
-      '',
+      `**QA concluido**${project} (${durationMin}min | $${data.costUsd.toFixed(4)})`,
       mergeStatus,
-      data.prUrl ? `PR: ${data.prUrl}` : '',
-      '',
-      data.merged ? 'Task **Done**.' : 'Review merge status manually.',
+      data.merged ? 'Aguardando deploy...' : '',
     ].filter(Boolean).join('\n');
 
     await this.safeComment(cardId, comment);
   }
 
-  async postPipelineSummary(cardId: string, data: PipelineSummaryData): Promise<void> {
+  async postDoneSummary(cardId: string, data: PipelineSummaryData): Promise<void> {
     const totalMin = Math.round(data.totalDurationMs / 60_000);
-    const status = data.merged ? 'Merged' : 'Completed (merge pending)';
+    const project = data.projectName ? ` [${data.projectName}]` : '';
 
-    const comment = [
-      '**Pipeline Summary**',
+    const lines: string[] = [
+      `**Task Concluida**${project}`,
       '',
-      `- Status: ${status}`,
-      `- Total Cost: $${data.totalCostUsd.toFixed(4)}`,
-      `- Total Duration: ${totalMin}min`,
-      '',
-      'Task fully automated from Todo to Done.',
-    ].join('\n');
+    ];
 
-    await this.safeComment(cardId, comment);
+    if (data.commitSummary) {
+      lines.push('**O que foi feito:**');
+      // Parse commit log lines into bullet points
+      const commits = data.commitSummary
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .slice(0, 10);
+      for (const commit of commits) {
+        lines.push(`- ${commit}`);
+      }
+      lines.push('');
+    }
+
+    if (data.prUrl) {
+      lines.push(`**PR:** ${data.prUrl}`);
+    }
+    lines.push(`**Custo:** $${data.totalCostUsd.toFixed(4)} | **Duracao:** ${totalMin}min`);
+    lines.push('');
+    lines.push('Pipeline automatizado de Todo ate Done.');
+
+    await this.safeComment(cardId, lines.join('\n'));
   }
 
-  async postError(cardId: string, stage: PipelineStage, errorMessage: string): Promise<void> {
+  async postError(cardId: string, stage: PipelineStage, errorMessage: string, projectName?: string): Promise<void> {
+    const project = projectName ? ` [${projectName}]` : '';
     const comment = [
-      `**Pipeline Error** at stage: ${stage}`,
+      `**Erro no pipeline**${project} — stage: ${stage}`,
       '',
       '```',
       errorMessage.substring(0, 1000),
       '```',
       '',
-      'Pipeline halted. Manual intervention required.',
+      'Pipeline parado. Necessario intervencao manual.',
     ].join('\n');
 
     await this.safeComment(cardId, comment);
