@@ -58,13 +58,6 @@ export class ImplementStage {
     // Load or generate project knowledge
     await this.ensureKnowledge(workDir, repoUrl);
 
-    // Run complexity estimation (optional, non-blocking)
-    const estimate = await this.estimateComplexity(card, workDir);
-    if (estimate) {
-      console.log(`[Implement] Complexity: ${estimate.size} (~${estimate.estimatedMinutes}min)`);
-      await this.commenter.postComplexityEstimate(card.id, estimate);
-    }
-
     // Download image attachments for visual context
     const imagePaths = await this.downloadImageAttachments(card, workDir);
     if (imagePaths.length > 0) {

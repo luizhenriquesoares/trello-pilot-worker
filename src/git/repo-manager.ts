@@ -74,10 +74,13 @@ export class RepoManager {
     const authUrl = this.buildAuthUrl(repoUrl);
     await this.execGit('/tmp', [
       'clone',
+      '--depth', '1',
       '--branch', baseBranch,
       authUrl,
       targetDir,
     ]);
+    // Unshallow enough for diff/log against main
+    await this.execGit(targetDir, ['fetch', '--depth', '50', 'origin', baseBranch]).catch(() => {});
   }
 
   async createBranch(cwd: string, branchName: string): Promise<void> {

@@ -108,9 +108,9 @@ export class PipelineOrchestrator {
     try {
       // Timeout per stage
       const STAGE_TIMEOUTS: Record<string, number> = {
-        implement: 40 * 60 * 1000,
-        review: 15 * 60 * 1000,
-        qa: 20 * 60 * 1000,
+        implement: 60 * 60 * 1000, // 60 min — covers full inline pipeline (impl+review+qa)
+        review: 15 * 60 * 1000,    // standalone retry only
+        qa: 20 * 60 * 1000,        // standalone retry only
       };
       const STAGE_TIMEOUT_MS = STAGE_TIMEOUTS[stageName] || 30 * 60 * 1000;
       const stagePromise = (async () => {
@@ -176,78 +176,113 @@ export class PipelineOrchestrator {
     }
   }
 
+  /**
+   * Full pipeline: IMPLEMENT → REVIEW → QA inline (no SQS between stages).
+   * Eliminates 2 SQS roundtrips + 2 cold starts = ~30-60s saved.
+   */
   private async handleImplement(
     event: WorkerEvent,
     cardName: string,
     onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void,
   ): Promise<void> {
-    // Move card to doing list
+    const pipelineStart = Date.now();
+
+    // === IMPLEMENT ===
     await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.doing);
+    const implResult = await this.implementStage.execute(event, onEvent);
 
-    const result = await this.implementStage.execute(event, onEvent);
-
-    // Move card to review list
+    // === REVIEW (inline) ===
     await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.review);
+    console.log(`[Orchestrator] Running inline REVIEW for card ${event.cardId}`);
 
-    // Enqueue next stage (review) with context from implement
-    const nextStage = NEXT_STAGE_MAP[PipelineStage.IMPLEMENT];
-    if (nextStage) {
-      const nextEvent: WorkerEvent = { ...event, stage: nextStage };
-      const context: PipelineContext = {
-        branchName: result.branchName,
-        prUrl: result.prUrl,
-        workDir: result.workDir,
-        cumulativeCostUsd: result.costUsd,
-        cardName,
-        projectName: event.projectName,
-        commitSummary: result.commitSummary,
-      };
+    const reviewContext: ReviewContext = {
+      branchName: implResult.branchName,
+      prUrl: implResult.prUrl,
+      workDir: implResult.workDir,
+    };
+    const reviewResult = await this.reviewStage.execute(event, reviewContext);
 
-      await this.sqsProducer.sendWithContext(nextEvent, context);
-      console.log(`[Orchestrator] Enqueued ${nextStage} stage for card ${event.cardId}`);
+    // === QA (inline) ===
+    await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.qa);
+    console.log(`[Orchestrator] Running inline QA for card ${event.cardId}`);
+
+    const qaContext: QaContext = {
+      branchName: reviewResult.branchName,
+      prUrl: reviewResult.prUrl,
+      workDir: reviewResult.workDir,
+    };
+    const qaResult = await this.qaStage.execute(event, qaContext);
+
+    // === POST-QA ===
+    const totalCost = implResult.costUsd + reviewResult.costUsd + qaResult.costUsd;
+    const totalDurationMs = Date.now() - pipelineStart;
+    const projectName = event.projectName || 'Unknown';
+
+    // Mark all checklist items as complete
+    await this.markChecklistsComplete(event.cardId).catch((err) => {
+      console.warn(`[Orchestrator] Failed to mark checklists: ${(err as Error).message}`);
+    });
+
+    // Auto-update CLAUDE.md
+    if (qaResult.merged && implResult.workDir) {
+      await this.autoUpdateClaudeMd(implResult.workDir, event.repoUrl).catch((err) => {
+        console.warn(`[Orchestrator] CLAUDE.md auto-update failed (non-blocking): ${(err as Error).message}`);
+      });
     }
+
+    // Move to Done via deploy watcher or immediately
+    if (this.deployWatcher) {
+      this.deployWatcher.addPending(
+        event.cardId,
+        projectName,
+        totalCost,
+        implResult.branchName,
+        event.repoUrl,
+        cardName,
+        implResult.commitSummary,
+        implResult.prUrl,
+        totalDurationMs,
+      );
+    } else {
+      await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
+        console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
+      });
+
+      await this.commenter.postDoneSummary(event.cardId, {
+        merged: qaResult.merged,
+        totalCostUsd: totalCost,
+        totalDurationMs,
+        projectName,
+        commitSummary: implResult.commitSummary,
+        prUrl: implResult.prUrl,
+        cardName,
+      });
+
+      this.slackNotifier.notifyComplete(
+        cardName, qaResult.merged, totalCost, projectName, implResult.commitSummary, implResult.prUrl,
+      ).catch(() => {});
+    }
+
+    console.log(`[Orchestrator] Pipeline complete for card ${event.cardId}. Merged: ${qaResult.merged}. Cost: $${totalCost.toFixed(4)}. Duration: ${Math.round(totalDurationMs / 1000)}s`);
   }
 
+  /** Handle REVIEW stage when triggered via SQS (backward compat / retry) */
   private async handleReview(
     event: WorkerEvent,
-    cardName: string,
+    _cardName: string,
     context?: PipelineContext,
     _onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void,
   ): Promise<void> {
     if (!context) {
-      throw new Error('Review stage requires pipeline context (branchName, workDir) from implement stage');
+      throw new Error('Review stage requires pipeline context from implement stage');
     }
-
-    const reviewContext: ReviewContext = {
-      branchName: context.branchName,
-      prUrl: context.prUrl,
-      workDir: context.workDir,
-    };
-
-    const result = await this.reviewStage.execute(event, reviewContext);
-
-    // Move card to QA list
+    const reviewContext: ReviewContext = { branchName: context.branchName, prUrl: context.prUrl, workDir: context.workDir };
+    await this.reviewStage.execute(event, reviewContext);
     await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.qa);
-
-    // Enqueue next stage (qa) — carry forward cardName, projectName, commitSummary
-    const nextStage = NEXT_STAGE_MAP[PipelineStage.REVIEW];
-    if (nextStage) {
-      const nextEvent: WorkerEvent = { ...event, stage: nextStage };
-      const nextContext: PipelineContext = {
-        branchName: result.branchName,
-        prUrl: result.prUrl,
-        workDir: result.workDir,
-        cumulativeCostUsd: context.cumulativeCostUsd + result.costUsd,
-        cardName,
-        projectName: context.projectName,
-        commitSummary: context.commitSummary,
-      };
-
-      await this.sqsProducer.sendWithContext(nextEvent, nextContext);
-      console.log(`[Orchestrator] Enqueued ${nextStage} stage for card ${event.cardId}`);
-    }
+    console.log(`[Orchestrator] Standalone REVIEW complete for card ${event.cardId}`);
   }
 
+  /** Handle QA stage when triggered via SQS (backward compat / retry) */
   private async handleQa(
     event: WorkerEvent,
     cardName: string,
@@ -255,67 +290,24 @@ export class PipelineOrchestrator {
     _onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void,
   ): Promise<void> {
     if (!context) {
-      throw new Error('QA stage requires pipeline context (branchName, workDir) from review stage');
+      throw new Error('QA stage requires pipeline context from review stage');
     }
-
-    const qaContext: QaContext = {
-      branchName: context.branchName,
-      prUrl: context.prUrl,
-      workDir: context.workDir,
-    };
-
+    const qaContext: QaContext = { branchName: context.branchName, prUrl: context.prUrl, workDir: context.workDir };
     const result = await this.qaStage.execute(event, qaContext);
 
     const totalCost = context.cumulativeCostUsd + result.costUsd;
     const projectName = event.projectName || context.projectName || 'Unknown';
 
-    // Mark all checklist items as complete on Trello
-    await this.markChecklistsComplete(event.cardId).catch((err) => {
-      console.warn(`[Orchestrator] Failed to mark checklists: ${(err as Error).message}`);
-    });
+    await this.markChecklistsComplete(event.cardId).catch(() => {});
 
-    // Auto-update CLAUDE.md with any new patterns discovered during implementation
-    if (result.merged && context.workDir) {
-      await this.autoUpdateClaudeMd(context.workDir, event.repoUrl).catch((err) => {
-        console.warn(`[Orchestrator] CLAUDE.md auto-update failed (non-blocking): ${(err as Error).message}`);
-      });
-    }
-
-    // Delegate to DeployWatcher (or move to Done immediately)
     if (this.deployWatcher) {
       this.deployWatcher.addPending(
-        event.cardId,
-        projectName,
-        totalCost,
-        context.branchName,
-        event.repoUrl,
-        cardName,
-        context.commitSummary,
-        context.prUrl,
-        result.durationMs,
+        event.cardId, projectName, totalCost, context.branchName, event.repoUrl,
+        cardName, context.commitSummary, context.prUrl, result.durationMs,
       );
-    } else {
-      // No deploy watcher — move to Done immediately with summary
-      await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
-        console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
-      });
-
-      await this.commenter.postDoneSummary(event.cardId, {
-        merged: result.merged,
-        totalCostUsd: totalCost,
-        totalDurationMs: result.durationMs,
-        projectName,
-        commitSummary: context.commitSummary,
-        prUrl: context.prUrl,
-        cardName,
-      });
-
-      this.slackNotifier.notifyComplete(
-        cardName, result.merged, totalCost, projectName, context.commitSummary, context.prUrl,
-      ).catch(() => {});
     }
 
-    console.log(`[Orchestrator] QA complete for card ${event.cardId}. Merged: ${result.merged}. Cost: $${totalCost.toFixed(4)}`);
+    console.log(`[Orchestrator] Standalone QA complete for card ${event.cardId}. Merged: ${result.merged}. Cost: $${totalCost.toFixed(4)}`);
   }
 
   /** Mark all checklist items as complete on the Trello card */
