@@ -1,6 +1,11 @@
-# Trello Pilot Worker
+# TaskPilot Worker
 
 Headless CI/CD pipeline that automates software development from Trello card to production deploy. Receives webhook events from Trello, runs Claude Code (Opus) for implementation, code review, and QA, then deploys via Railway.
+
+Part of the **TaskPilot** ecosystem:
+- [taskpilot-app](https://github.com/luizhenriquesoares/taskpilot-app) — Web app for creating tasks via text/voice
+- [taskpilot-vscode](https://github.com/luizhenriquesoares/taskpilot-vscode) — VS Code extension for interactive development
+- **taskpilot-worker** (this repo) — Headless automation server
 
 ## Architecture
 
@@ -39,7 +44,7 @@ src/
 ├── server/
 │   ├── routes.ts               # HTTP endpoints (health, jobs, logs)
 │   ├── webhook-handler.ts      # Trello webhook → SQS
-│   └── websocket.ts            # Real-time event streaming to UI
+│   └── websocket.ts            # Real-time event streaming to TaskPilot App
 ├── pipeline/
 │   ├── orchestrator.ts         # Stage sequencing, repo locks, inline pipeline
 │   └── stages/
@@ -148,7 +153,7 @@ Polls Railway every 30s after QA merge. On success, moves card to Done with summ
 ### Notifications
 - **Trello comments** — progress at each stage with project name, duration, cost
 - **Slack** — stage start, pipeline complete with commit summary, errors
-- **WebSocket** — real-time event streaming to TaskPilot UI
+- **WebSocket** — real-time event streaming to TaskPilot App
 
 ### Checklist Marking
 After QA passes, all checklist items on the Trello card are marked as complete.
