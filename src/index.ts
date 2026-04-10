@@ -25,12 +25,35 @@ let isShuttingDown = false;
 
 // --- Bootstrap ---
 
+async function cleanupStaleTmpDirs(): Promise<void> {
+  const { readdir, rm } = await import('fs/promises');
+  try {
+    const entries = await readdir('/tmp');
+    const stale = entries.filter((e) => e.startsWith('trello-pilot'));
+    if (stale.length === 0) return;
+    console.log(`[Worker] Removing ${stale.length} stale /tmp entries from previous runs`);
+    for (const entry of stale) {
+      const full = `/tmp/${entry}`;
+      try {
+        await rm(full, { recursive: true, force: true });
+      } catch (err) {
+        console.warn(`[Worker] Failed to clean ${full}: ${(err as Error).message}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[Worker] Stale /tmp sweep failed: ${(err as Error).message}`);
+  }
+}
+
 async function main(): Promise<void> {
   // Install log buffer to capture all console output
   const logBuffer = new LogBuffer();
   logBuffer.install();
 
   console.log('[Worker] Starting trello-pilot-worker...');
+
+  // Clean up leftover work dirs from crashed / killed previous runs
+  await cleanupStaleTmpDirs();
 
   // Load configuration
   const envConfig = loadEnvConfig();

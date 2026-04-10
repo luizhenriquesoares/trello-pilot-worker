@@ -191,6 +191,30 @@ export class PipelineOrchestrator {
     await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.doing);
     const implResult = await this.implementStage.execute(event, onEvent);
 
+    try {
+      return await this.runInlineReviewAndQa(event, cardName, implResult, pipelineStart);
+    } finally {
+      // Always clean up inline work directory once IMPLEMENT has produced one,
+      // regardless of whether REVIEW/QA succeeded. Prevents /tmp exhaustion that
+      // caused "cannot fork()" errors on subsequent git clones.
+      if (implResult.workDir) {
+        try {
+          const { rm } = await import('fs/promises');
+          await rm(implResult.workDir, { recursive: true, force: true });
+          console.log(`[Orchestrator] Cleaned up inline workDir: ${implResult.workDir}`);
+        } catch (cleanupErr) {
+          console.warn(`[Orchestrator] Failed to clean up workDir ${implResult.workDir}: ${(cleanupErr as Error).message}`);
+        }
+      }
+    }
+  }
+
+  private async runInlineReviewAndQa(
+    event: WorkerEvent,
+    cardName: string,
+    implResult: Awaited<ReturnType<ImplementStage['execute']>>,
+    pipelineStart: number,
+  ): Promise<void> {
     // === REVIEW (inline) ===
     await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.review);
     console.log(`[Orchestrator] Running inline REVIEW for card ${event.cardId}`);
