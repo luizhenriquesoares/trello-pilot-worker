@@ -30,21 +30,17 @@ export class SqsProducer {
   }
 
   /**
-   * Send a WorkerEvent without pipeline context (first stage trigger).
+   * Send a WorkerEvent. Used by the webhook handler when a Trello card lands
+   * on a project (or triage) list to kick off the IMPLEMENT pipeline.
    */
   async sendMessage(event: WorkerEvent): Promise<string> {
     return this.sendEnvelope({ event });
   }
 
   /**
-   * Send a WorkerEvent with pipeline context (stage-to-stage handoff).
-   */
-  async sendWithContext(event: WorkerEvent, context: PipelineContext): Promise<string> {
-    return this.sendEnvelope({ event, pipelineContext: context });
-  }
-
-  /**
-   * Re-enqueue a message with a delay (seconds). Used for repo lock contention.
+   * Re-enqueue a message with a delay (seconds). Used for repo lock contention
+   * — the orchestrator pushes the same envelope back when another card is
+   * already running on the same repo.
    */
   async sendWithDelay(envelope: SqsMessageEnvelope, delaySeconds: number): Promise<string> {
     return this.sendEnvelope(envelope, delaySeconds);

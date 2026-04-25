@@ -13,12 +13,11 @@ import { validateWorkerEvent, type WorkerEvent } from '../shared/types/worker-ev
 import { PermanentError } from '../shared/errors.js';
 import type { BoardConfig } from '../config/types.js';
 
-const NEXT_STAGE_MAP: Record<PipelineStage, PipelineStage | null> = {
-  [PipelineStage.IMPLEMENT]: PipelineStage.REVIEW,
-  [PipelineStage.REVIEW]: PipelineStage.QA,
-  [PipelineStage.QA]: null,
-};
-
+// The full IMPLEMENT → REVIEW → QA pipeline runs inline inside handleImplement
+// (no SQS handoff between stages). REVIEW and QA only ever come back to the
+// queue if external code re-enqueues them, which the worker no longer does —
+// so we treat any REVIEW/QA event as a stale message from a previous deploy
+// and reject it as permanent so the SQS DLQ catches it instead of looping.
 export class PipelineOrchestrator {
   private readonly repoLocks = new Map<string, string>(); // repoUrl → cardId
 
@@ -42,6 +41,14 @@ export class PipelineOrchestrator {
       throw new PermanentError(`Malformed worker event: ${validationErrors.join('; ')}`);
     }
 
+    // The pipeline only runs from IMPLEMENT — REVIEW/QA are inline within it.
+    // Anything else is a stale message from before the inline refactor.
+    if (event.stage !== PipelineStage.IMPLEMENT) {
+      throw new PermanentError(
+        `Stage "${event.stage}" is no longer enqueued — pipeline runs inline from IMPLEMENT. Drop this stale message.`,
+      );
+    }
+
     // Repo lock: prevent concurrent tasks on the same repository
     const lockHolder = this.repoLocks.get(event.repoUrl);
     if (lockHolder && lockHolder !== event.cardId) {
@@ -58,13 +65,7 @@ export class PipelineOrchestrator {
     this.repoLocks.set(event.repoUrl, event.cardId);
     console.log(`[Orchestrator] Acquired repo lock for ${event.repoUrl} (card ${event.cardId})`);
 
-    const stageMap: Record<PipelineStage, 'implement' | 'review' | 'qa'> = {
-      [PipelineStage.IMPLEMENT]: 'implement',
-      [PipelineStage.REVIEW]: 'review',
-      [PipelineStage.QA]: 'qa',
-    };
-
-    const stageName = stageMap[event.stage];
+    const stageName = 'implement';
     const projectName = event.projectName || 'Unknown';
 
     // Fetch card name for tracking
@@ -77,9 +78,10 @@ export class PipelineOrchestrator {
     const retryLabel = event.isRetry ? ' (RETRY)' : '';
     console.log(`[Orchestrator] Processing ${stageName}${retryLabel} for: ${cardName} [${projectName}]`);
 
-    // Guard: for IMPLEMENT stage, verify the card is still in the expected project list.
-    // This prevents stale SQS messages from running (e.g. card moved between project lists).
-    if (event.stage === PipelineStage.IMPLEMENT && event.originListId) {
+    // Stale guard: verify the card is still in the expected origin list before
+    // we kick off the (expensive) Claude pipeline. Catches users who moved the
+    // card between project lists between webhook fire and SQS drain.
+    if (event.originListId) {
       try {
         const card = await this.trelloApi.getCard(event.cardId);
         if (card.idList !== event.originListId) {
@@ -103,36 +105,13 @@ export class PipelineOrchestrator {
     const onEvent = this.broadcaster?.createStreamHandler(event.cardId, cardName, stageName);
 
     try {
-      // Timeout per stage
-      const STAGE_TIMEOUTS: Record<string, number> = {
-        implement: 60 * 60 * 1000, // 60 min — covers full inline pipeline (impl+review+qa)
-        review: 15 * 60 * 1000,    // standalone retry only
-        qa: 20 * 60 * 1000,        // standalone retry only
-      };
-      const STAGE_TIMEOUT_MS = STAGE_TIMEOUTS[stageName] || 30 * 60 * 1000;
-      const stagePromise = (async () => {
-        switch (event.stage) {
-          case PipelineStage.IMPLEMENT:
-            await this.handleImplement(event, cardName, onEvent);
-            break;
-          case PipelineStage.REVIEW:
-            await this.handleReview(event, cardName, pipelineContext, onEvent);
-            break;
-          case PipelineStage.QA:
-            await this.handleQa(event, cardName, pipelineContext, onEvent);
-            break;
-          default: {
-            const exhaustiveCheck: never = event.stage;
-            throw new Error(`Unknown pipeline stage: ${exhaustiveCheck}`);
-          }
-        }
-      })();
-
+      // 60 min — covers the full inline pipeline (IMPLEMENT + REVIEW + QA).
+      const STAGE_TIMEOUT_MS = 60 * 60 * 1000;
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Stage ${stageName} timed out after ${STAGE_TIMEOUTS[stageName]! / 60_000}min`)), STAGE_TIMEOUT_MS),
+        setTimeout(() => reject(new Error(`Pipeline timed out after ${STAGE_TIMEOUT_MS / 60_000}min`)), STAGE_TIMEOUT_MS),
       );
 
-      await Promise.race([stagePromise, timeoutPromise]);
+      await Promise.race([this.handleImplement(event, cardName, onEvent), timeoutPromise]);
 
       // Track job success
       if (jobId) {
@@ -166,14 +145,9 @@ export class PipelineOrchestrator {
         console.log(`[Orchestrator] Released repo lock for ${event.repoUrl} (card ${event.cardId})`);
       }
 
-      // Cleanup /tmp repos only after QA (last stage) — earlier stages pass workDir to next stage
-      if (event.stage === PipelineStage.QA && pipelineContext?.workDir) {
-        try {
-          const { rm } = await import('fs/promises');
-          await rm(pipelineContext.workDir, { recursive: true, force: true });
-          console.log(`[Orchestrator] Cleaned up: ${pipelineContext.workDir}`);
-        } catch { /* ignore cleanup errors */ }
-      }
+      // Inline pipeline cleans up its own workDir in handleImplement's finally,
+      // so there's nothing additional to remove here.
+      void pipelineContext;
     }
   }
 
@@ -296,69 +270,6 @@ export class PipelineOrchestrator {
     ).catch(() => {});
 
     console.log(`[Orchestrator] Pipeline complete for card ${event.cardId}. Merged: ${qaResult.merged}. Cost: $${totalCost.toFixed(4)}. Duration: ${Math.round(totalDurationMs / 1000)}s`);
-  }
-
-  /** Handle REVIEW stage when triggered via SQS (backward compat / retry) */
-  private async handleReview(
-    event: WorkerEvent,
-    _cardName: string,
-    context?: PipelineContext,
-    _onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void,
-  ): Promise<void> {
-    if (!context) {
-      throw new Error('Review stage requires pipeline context from implement stage');
-    }
-    const reviewContext: ReviewContext = { branchName: context.branchName, prUrl: context.prUrl, workDir: context.workDir };
-    await this.reviewStage.execute(event, reviewContext);
-    await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.qa);
-    console.log(`[Orchestrator] Standalone REVIEW complete for card ${event.cardId}`);
-  }
-
-  /** Handle QA stage when triggered via SQS (backward compat / retry) */
-  private async handleQa(
-    event: WorkerEvent,
-    cardName: string,
-    context?: PipelineContext,
-    _onEvent?: (e: import('../claude/headless-runner.js').ClaudeStreamEvent) => void,
-  ): Promise<void> {
-    if (!context) {
-      throw new Error('QA stage requires pipeline context from review stage');
-    }
-    const qaContext: QaContext = { branchName: context.branchName, prUrl: context.prUrl, workDir: context.workDir };
-    const result = await this.qaStage.execute(event, qaContext);
-
-    const totalCost = context.cumulativeCostUsd + result.costUsd;
-    const projectName = event.projectName || context.projectName || 'Unknown';
-
-    if (!result.merged) {
-      console.warn(`[Orchestrator] Standalone QA did not merge for card ${event.cardId} — leaving card in QA list`);
-      this.slackNotifier.notifyError(
-        cardName, event.stage, 'QA failed or PR merge was blocked — card left in QA for review', projectName,
-      ).catch(() => {});
-      return;
-    }
-
-    await this.markChecklistsComplete(event.cardId).catch(() => {});
-
-    await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
-      console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
-    });
-
-    await this.commenter.postDoneSummary(event.cardId, {
-      merged: result.merged,
-      totalCostUsd: totalCost,
-      totalDurationMs: result.durationMs,
-      projectName,
-      commitSummary: context.commitSummary,
-      prUrl: context.prUrl,
-      cardName,
-    });
-
-    this.slackNotifier.notifyComplete(
-      cardName, result.merged, totalCost, projectName, context.commitSummary, context.prUrl,
-    ).catch(() => {});
-
-    console.log(`[Orchestrator] Standalone QA complete for card ${event.cardId}. Merged: ${result.merged}. Cost: $${totalCost.toFixed(4)}`);
   }
 
   /** Mark all checklist items as complete on the Trello card */

@@ -81,11 +81,17 @@ Status:
 - **Status:** Resolvido — projetos migraram pra Hostinger (CI/CD no commit). O `DeployWatcher` inteiro foi removido (`src/deploy/watcher.ts` deletado), eliminando `recoverStuckCards()` e o risco que ele introduzia.
 - **Comportamento atual:** após merge bem-sucedido, o card vai direto pra Done. O CI/CD do Hostinger pega o commit em paralelo.
 
-### 7. Fluxo standalone REVIEW/QA truncado ✅ (parcial)
+### 7. Fluxo standalone REVIEW/QA truncado ✅ (resolvido por deleção)
 - **Origem:** QA review
-- **Arquivos:** [orchestrator.ts](src/pipeline/orchestrator.ts) `handleReview` / `handleQa`
-- **Status:** `handleQa` agora completa o fluxo (move pra Done + Slack) quando o merge é bem-sucedido, e respeita o `merged=false` (deixa em QA). Limpeza do Railway tornou o caminho consistente com o inline.
-- **Pendente:** `handleReview` ainda só move pra QA sem rodar QA — decidir se é intencional ou se deve disparar QA via SQS.
+- **Decisão:** o pipeline corre **inline** dentro do `handleImplement` (IMPLEMENT → REVIEW → QA num único processo) desde a refatoração de performance. Os caminhos `handleReview` / `handleQa` standalone eram alcançáveis só via injeção manual de mensagem SQS — ninguém os enfileirava. Manter o código truncado mascarava o estado real do worker.
+- **Mudanças:**
+  - `handleReview` e `handleQa` removidos de `orchestrator.ts`.
+  - `processEvent` rejeita eventos com `stage !== IMPLEMENT` como `PermanentError` (vão pra DLQ — limpa restos de mensagens antigas em caso de redeploy).
+  - `NEXT_STAGE_MAP` (sem uso) removido.
+  - `SqsProducer.sendWithContext` (sem uso) removido.
+  - Stage timeout simplificado de 3 valores pra 1 (60min cobre o pipeline inline).
+  - Cleanup de workDir condicional ao stage QA removido (handleImplement já limpa via finally).
+- **Aceite:** worker continua passando 51 testes; bundle de 138KB → 134KB com o código morto removido.
 
 ### 8. Sem testes automatizados
 - **Origem:** QA review
