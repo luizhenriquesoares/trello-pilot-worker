@@ -12,8 +12,7 @@
       "name": "Portal Bb2",
       "repoUrl": "https://github.com/maismilhas-br/maismilhas.b2b.portal",
       "baseBranch": "main",
-      "branchPrefix": "feat/",
-      "railwayProjectId": "e99f8a0f-1b54-49f1-977b-c5fc467bc563"
+      "branchPrefix": "feat/"
     },
     {
       "id": "65b7aa1ea6a0e4441a5c2281",
@@ -27,16 +26,14 @@
       "name": "MilhasNexus",
       "repoUrl": "https://github.com/maismilhas-br/maismilhas.nexus.app",
       "baseBranch": "main",
-      "branchPrefix": "feat/",
-      "railwayProjectId": "db1d70c9-5edf-4b46-992d-e28c492b4928"
+      "branchPrefix": "feat/"
     },
     {
       "id": "65b7a954fbd8c9fa3c9bed73",
       "name": "Site American",
       "repoUrl": "https://github.com/maismilhas-br/maismilhas.aa.landing",
       "baseBranch": "main",
-      "branchPrefix": "feat/",
-      "railwayProjectId": "9341db39-ad51-49f4-9dd5-d07fc93f385a"
+      "branchPrefix": "feat/"
     },
     {
       "id": "65b7a94e71f183610d747e2d",

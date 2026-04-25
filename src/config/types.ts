@@ -5,7 +5,6 @@ export interface ProjectList {
   baseBranch: string;
   branchPrefix: string;
   rules?: string[];
-  railwayProjectId?: string;
 }
 
 export interface BoardConfig {
@@ -29,6 +28,6 @@ export interface EnvConfig {
   trelloKey: string;
   trelloToken: string;
   trelloWebhookSecret?: string;
+  publicBaseUrl?: string;
   slackWebhookUrl?: string;
-  railwayToken?: string;
 }

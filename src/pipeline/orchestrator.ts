@@ -7,10 +7,10 @@ import { TrelloCommenter } from '../notifications/trello-commenter.js';
 import { SlackNotifier } from '../notifications/slack.js';
 import { JobTracker } from '../tracking/job-tracker.js';
 import { StreamBroadcaster } from '../server/websocket.js';
-import { DeployWatcher } from '../deploy/watcher.js';
 import { runClaude } from '../claude/headless-runner.js';
 import { PipelineStage } from '../shared/types/pipeline-stage.js';
 import { validateWorkerEvent, type WorkerEvent } from '../shared/types/worker-event.js';
+import { PermanentError } from '../shared/errors.js';
 import type { BoardConfig } from '../config/types.js';
 
 const NEXT_STAGE_MAP: Record<PipelineStage, PipelineStage | null> = {
@@ -19,15 +19,7 @@ const NEXT_STAGE_MAP: Record<PipelineStage, PipelineStage | null> = {
   [PipelineStage.QA]: null,
 };
 
-interface PendingDeploy {
-  cardId: string;
-  projectName: string;
-  mergedAt: string;
-  totalCostUsd: number;
-}
-
 export class PipelineOrchestrator {
-  readonly pendingDeploys = new Map<string, PendingDeploy>();
   private readonly repoLocks = new Map<string, string>(); // repoUrl → cardId
 
   constructor(
@@ -41,16 +33,13 @@ export class PipelineOrchestrator {
     private readonly boardConfig: BoardConfig,
     private readonly jobTracker?: JobTracker,
     private readonly broadcaster?: StreamBroadcaster,
-    private readonly deployWatcher?: DeployWatcher,
   ) {}
 
   async processEvent(event: WorkerEvent, pipelineContext?: PipelineContext): Promise<void> {
     const validationErrors = validateWorkerEvent(event);
     if (validationErrors.length > 0) {
-      console.warn(
-        `[Orchestrator] Ignoring malformed event: ${validationErrors.join('; ')}`,
-      );
-      return;
+      // Permanent: a malformed event will never become valid on retry.
+      throw new PermanentError(`Malformed worker event: ${validationErrors.join('; ')}`);
     }
 
     // Repo lock: prevent concurrent tasks on the same repository
@@ -166,6 +155,10 @@ export class PipelineOrchestrator {
       await this.commenter.postError(event.cardId, event.stage, errorMessage, projectName).catch((commentErr) => {
         console.error(`[Orchestrator] Failed to post error comment: ${(commentErr as Error).message}`);
       });
+
+      // Re-throw so the SQS poll loop can decide to retry vs delete based on
+      // the error type (PermanentError → delete, anything else → keep for redelivery).
+      throw err;
     } finally {
       // Release repo lock
       if (this.repoLocks.get(event.repoUrl) === event.cardId) {
@@ -250,50 +243,57 @@ export class PipelineOrchestrator {
     const totalDurationMs = Date.now() - pipelineStart;
     const projectName = event.projectName || 'Unknown';
 
+    // Don't promote a card to Done when QA didn't merge — leave it in the QA
+    // list with the failure comment posted by the QA stage so a human can
+    // intervene. Without this guard the deploy watcher would move it to Done
+    // after the 15min timeout (with a misleading "merged" message), or the
+    // no-watcher fallback would promote immediately.
+    if (!qaResult.merged) {
+      console.warn(
+        `[Orchestrator] QA did not merge for card ${event.cardId} — card stays in QA list, no Done promotion`,
+      );
+      this.slackNotifier.notifyError(
+        cardName,
+        event.stage,
+        'QA failed or PR merge was blocked — card left in QA for review',
+        projectName,
+      ).catch(() => {});
+      console.log(`[Orchestrator] Pipeline halted at QA for card ${event.cardId}. Cost: $${totalCost.toFixed(4)}. Duration: ${Math.round(totalDurationMs / 1000)}s`);
+      return;
+    }
+
     // Mark all checklist items as complete
     await this.markChecklistsComplete(event.cardId).catch((err) => {
       console.warn(`[Orchestrator] Failed to mark checklists: ${(err as Error).message}`);
     });
 
     // Auto-update CLAUDE.md
-    if (qaResult.merged && implResult.workDir) {
+    if (implResult.workDir) {
       await this.autoUpdateClaudeMd(implResult.workDir, event.repoUrl).catch((err) => {
         console.warn(`[Orchestrator] CLAUDE.md auto-update failed (non-blocking): ${(err as Error).message}`);
       });
     }
 
-    // Move to Done via deploy watcher or immediately
-    if (this.deployWatcher) {
-      this.deployWatcher.addPending(
-        event.cardId,
-        projectName,
-        totalCost,
-        implResult.branchName,
-        event.repoUrl,
-        cardName,
-        implResult.commitSummary,
-        implResult.prUrl,
-        totalDurationMs,
-      );
-    } else {
-      await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
-        console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
-      });
+    // Move card to Done. Hostinger CI/CD picks up the merged commit and deploys
+    // automatically — no API to verify the deploy itself, and waiting on a poll
+    // would just delay the card without adding signal.
+    await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
+      console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
+    });
 
-      await this.commenter.postDoneSummary(event.cardId, {
-        merged: qaResult.merged,
-        totalCostUsd: totalCost,
-        totalDurationMs,
-        projectName,
-        commitSummary: implResult.commitSummary,
-        prUrl: implResult.prUrl,
-        cardName,
-      });
+    await this.commenter.postDoneSummary(event.cardId, {
+      merged: qaResult.merged,
+      totalCostUsd: totalCost,
+      totalDurationMs,
+      projectName,
+      commitSummary: implResult.commitSummary,
+      prUrl: implResult.prUrl,
+      cardName,
+    });
 
-      this.slackNotifier.notifyComplete(
-        cardName, qaResult.merged, totalCost, projectName, implResult.commitSummary, implResult.prUrl,
-      ).catch(() => {});
-    }
+    this.slackNotifier.notifyComplete(
+      cardName, qaResult.merged, totalCost, projectName, implResult.commitSummary, implResult.prUrl,
+    ).catch(() => {});
 
     console.log(`[Orchestrator] Pipeline complete for card ${event.cardId}. Merged: ${qaResult.merged}. Cost: $${totalCost.toFixed(4)}. Duration: ${Math.round(totalDurationMs / 1000)}s`);
   }
@@ -330,14 +330,33 @@ export class PipelineOrchestrator {
     const totalCost = context.cumulativeCostUsd + result.costUsd;
     const projectName = event.projectName || context.projectName || 'Unknown';
 
+    if (!result.merged) {
+      console.warn(`[Orchestrator] Standalone QA did not merge for card ${event.cardId} — leaving card in QA list`);
+      this.slackNotifier.notifyError(
+        cardName, event.stage, 'QA failed or PR merge was blocked — card left in QA for review', projectName,
+      ).catch(() => {});
+      return;
+    }
+
     await this.markChecklistsComplete(event.cardId).catch(() => {});
 
-    if (this.deployWatcher) {
-      this.deployWatcher.addPending(
-        event.cardId, projectName, totalCost, context.branchName, event.repoUrl,
-        cardName, context.commitSummary, context.prUrl, result.durationMs,
-      );
-    }
+    await this.trelloApi.moveCard(event.cardId, this.boardConfig.lists.done).catch((err) => {
+      console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
+    });
+
+    await this.commenter.postDoneSummary(event.cardId, {
+      merged: result.merged,
+      totalCostUsd: totalCost,
+      totalDurationMs: result.durationMs,
+      projectName,
+      commitSummary: context.commitSummary,
+      prUrl: context.prUrl,
+      cardName,
+    });
+
+    this.slackNotifier.notifyComplete(
+      cardName, result.merged, totalCost, projectName, context.commitSummary, context.prUrl,
+    ).catch(() => {});
 
     console.log(`[Orchestrator] Standalone QA complete for card ${event.cardId}. Merged: ${result.merged}. Cost: $${totalCost.toFixed(4)}`);
   }
@@ -430,32 +449,5 @@ export class PipelineOrchestrator {
       const { rm } = await import('fs/promises');
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
-  }
-
-  /**
-   * Called by deploy watcher when a deployment succeeds.
-   * Moves card from QA to Done and comments on Trello.
-   */
-  async confirmDeploy(cardId: string): Promise<boolean> {
-    const pending = this.pendingDeploys.get(cardId);
-    if (!pending) return false;
-
-    console.log(`[Orchestrator] Deploy confirmed for card ${cardId}. Moving to Done.`);
-
-    await this.trelloApi.moveCard(cardId, this.boardConfig.lists.done).catch((err) => {
-      console.error(`[Orchestrator] Failed to move card to Done: ${(err as Error).message}`);
-    });
-
-    await this.trelloApi.addComment(cardId,
-      `**Deployed to production** :rocket:\n\nTotal pipeline cost: $${pending.totalCostUsd.toFixed(4)}\nTask **Done**.`
-    ).catch(() => {});
-
-    this.pendingDeploys.delete(cardId);
-    return true;
-  }
-
-  /** Get all cards waiting for deploy confirmation */
-  getPendingDeploys(): PendingDeploy[] {
-    return Array.from(this.pendingDeploys.values());
   }
 }

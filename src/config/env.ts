@@ -24,7 +24,7 @@ export function loadEnvConfig(): EnvConfig {
     trelloKey: process.env.TRELLO_KEY || '',
     trelloToken: process.env.TRELLO_TOKEN || '',
     trelloWebhookSecret: process.env.TRELLO_WEBHOOK_SECRET,
+    publicBaseUrl: process.env.PUBLIC_BASE_URL,
     slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
-    railwayToken: process.env.RAILWAY_TOKEN,
   };
 }

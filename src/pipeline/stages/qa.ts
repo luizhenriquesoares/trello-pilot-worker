@@ -83,22 +83,33 @@ export class QaStage {
 
     const costUsd = runResult.costUsd ?? 0;
 
-    // Push any QA fixes
+    // Block merge if QA itself didn't run cleanly. exitCode 124 = timeout.
+    // Without this guard a Claude crash/timeout would still advance to gh pr merge,
+    // promoting unverified code to main.
+    const qaPassed = runResult.exitCode === 0;
+    if (!qaPassed) {
+      const reason = runResult.exitCode === 124 ? 'timed out' : `exited with code ${runResult.exitCode}`;
+      console.error(`[QA] Claude QA ${reason} on branch "${branchName}" — skipping merge`);
+    }
+
+    // Push any QA fixes (safe even when QA failed; just pushes whatever's already committed)
     try {
       await this.repoManager.push(workDir, branchName);
     } catch (err) {
       console.warn(`[QA] Push failed (may have no changes): ${(err as Error).message}`);
     }
 
-    // Merge PR via squash
+    // Merge PR via squash — only if QA passed
     let merged = false;
-    try {
-      console.log(`[QA] Merging PR for branch: ${branchName}`);
-      await this.repoManager.mergePr(workDir, branchName);
-      merged = true;
-      console.log('[QA] PR merged successfully');
-    } catch (err) {
-      console.error(`[QA] PR merge failed: ${(err as Error).message}`);
+    if (qaPassed) {
+      try {
+        console.log(`[QA] Merging PR for branch: ${branchName}`);
+        await this.repoManager.mergePr(workDir, branchName);
+        merged = true;
+        console.log('[QA] PR merged successfully');
+      } catch (err) {
+        console.error(`[QA] PR merge failed: ${(err as Error).message}`);
+      }
     }
 
     // Comment on Trello

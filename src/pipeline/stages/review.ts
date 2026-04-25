@@ -89,6 +89,12 @@ export class ReviewStage {
 
     const costUsd = runResult.costUsd ?? 0;
 
+    // Don't promote a stage that crashed/timed out. exitCode 124 = timeout.
+    if (runResult.exitCode !== 0) {
+      const reason = runResult.exitCode === 124 ? 'timed out' : `exited with code ${runResult.exitCode}`;
+      throw new Error(`Claude review ${reason} on branch "${branchName}" — refusing to advance to QA`);
+    }
+
     // Push review fixes
     console.log(`[Review] Pushing review fixes for branch: ${branchName}`);
     try {

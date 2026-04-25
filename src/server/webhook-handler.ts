@@ -8,6 +8,10 @@ import type { WorkerEvent } from '../shared/types/worker-event.js';
 import type { BoardConfig } from '../config/types.js';
 import type { TrelloCredentials } from '../trello/types.js';
 
+interface RawBodyRequest extends Request {
+  rawBody?: string;
+}
+
 interface TrelloWebhookBody {
   action: {
     type: string;
@@ -66,17 +70,32 @@ export class WebhookHandler {
   /**
    * Handle POST request from Trello webhook.
    * Filters for cards moved/created in project lists, then sends a WorkerEvent to SQS.
+   *
+   * Responds 200 only AFTER the SQS enqueue succeeds. If SQS fails, returns 5xx
+   * so Trello retries the delivery — otherwise the card would silently disappear
+   * from the pipeline.
    */
   async handleWebhook(req: Request, res: Response): Promise<void> {
-    // Verify signature if webhook secret is configured
-    if (this.webhookSecret && this.callbackUrl) {
+    if (this.webhookSecret) {
+      if (!this.callbackUrl) {
+        console.error('[Webhook] TRELLO_WEBHOOK_SECRET set but PUBLIC_BASE_URL missing — refusing unverified request');
+        res.status(500).json({ error: 'Webhook signature verification misconfigured' });
+        return;
+      }
+
       const signature = req.headers['x-trello-webhook'] as string | undefined;
       if (!signature) {
         res.status(401).json({ error: 'Missing webhook signature' });
         return;
       }
 
-      const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+      const rawBody = (req as RawBodyRequest).rawBody;
+      if (!rawBody) {
+        console.error('[Webhook] rawBody missing — express.json verify hook not wired');
+        res.status(500).json({ error: 'Webhook signature verification misconfigured' });
+        return;
+      }
+
       const isValid = verifyTrelloWebhookSignature(rawBody, this.callbackUrl, this.webhookSecret, signature);
       if (!isValid) {
         res.status(401).json({ error: 'Invalid webhook signature' });
@@ -84,15 +103,12 @@ export class WebhookHandler {
       }
     }
 
-    // Respond immediately to avoid Trello timeout
-    res.status(200).json({ received: true });
-
     try {
       const body = req.body as TrelloWebhookBody;
       const action = body?.action;
 
       if (!action) {
-        console.log('[Webhook] No action in body, ignoring');
+        res.status(200).json({ received: true, ignored: 'no action' });
         return;
       }
 
@@ -100,34 +116,37 @@ export class WebhookHandler {
       const card = action.data.card;
 
       if (!card) {
-        console.log(`[Webhook] Action ${actionType} has no card data, ignoring`);
+        res.status(200).json({ received: true, ignored: `no card on ${actionType}` });
         return;
       }
 
-      // Handle card moved to a project list (Todo list)
       if (actionType === CARD_MOVE_ACTION && action.data.listAfter) {
         const targetListId = action.data.listAfter.id;
         const sourceListId = action.data.listBefore?.id;
-        await this.handleCardMoved(card, targetListId, sourceListId, action.data.board?.id);
+        const result = await this.handleCardMoved(card, targetListId, sourceListId, action.data.board?.id);
+        res.status(200).json({ received: true, ...result });
         return;
       }
 
-      // Handle card created in a project list
       if (actionType === CREATE_CARD_ACTION && action.data.list) {
         const targetListId = action.data.list.id;
-        await this.handleCardCreated(card, targetListId, action.data.board?.id);
+        const result = await this.handleCardCreated(card, targetListId, action.data.board?.id);
+        res.status(200).json({ received: true, ...result });
         return;
       }
 
-      // Only log unexpected actions (skip common noise like commentCard, checkItem updates)
       const silentActions = ['commentCard', 'updateCheckItemStateOnCard', 'updateCheckItem',
         'addAttachmentToCard', 'deleteComment', 'createCheckItem', 'addChecklistToCard',
         'removeChecklistFromCard', 'deleteAttachmentFromCard'];
       if (!silentActions.includes(actionType)) {
         console.log(`[Webhook] Action ${actionType} not handled, ignoring`);
       }
+      res.status(200).json({ received: true, ignored: actionType });
     } catch (err) {
-      console.error(`[Webhook] Error processing webhook: ${(err as Error).message}`);
+      const msg = (err as Error).message;
+      console.error(`[Webhook] Failed to enqueue: ${msg}`);
+      // 5xx so Trello reattempts delivery — not losing the card silently
+      res.status(503).json({ error: 'Failed to enqueue', detail: msg });
     }
   }
 
@@ -136,14 +155,13 @@ export class WebhookHandler {
     targetListId: string,
     sourceListId?: string,
     boardId?: string,
-  ): Promise<void> {
+  ): Promise<{ enqueued: boolean; messageId?: string; ignored?: string }> {
     const project = resolveProjectForList(this.boardConfig, targetListId);
     if (!project) {
       console.log(`[Webhook] Card "${card.name}" moved to non-project list, ignoring`);
-      return;
+      return { enqueued: false, ignored: 'non-project list' };
     }
 
-    // Detect reopen: card moved FROM Done back to a project list
     const isRetry = sourceListId === this.boardConfig.lists.done;
 
     let retryFeedback: string | undefined;
@@ -158,17 +176,18 @@ export class WebhookHandler {
     const event = this.buildWorkerEvent(card.id, boardId, project, isRetry, retryFeedback);
     const messageId = await this.sqsProducer.sendMessage(event);
     console.log(`[Webhook] SQS message sent: ${messageId}`);
+    return { enqueued: true, messageId };
   }
 
   private async handleCardCreated(
     card: { id: string; name: string; idShort: number },
     targetListId: string,
     boardId?: string,
-  ): Promise<void> {
+  ): Promise<{ enqueued: boolean; messageId?: string; ignored?: string }> {
     const project = resolveProjectForList(this.boardConfig, targetListId);
     if (!project) {
       console.log(`[Webhook] Card "${card.name}" created in non-project list, ignoring`);
-      return;
+      return { enqueued: false, ignored: 'non-project list' };
     }
 
     console.log(`[Webhook] Card "${card.name}" created in project "${project.name}". Enqueueing IMPLEMENT.`);
@@ -176,6 +195,7 @@ export class WebhookHandler {
     const event = this.buildWorkerEvent(card.id, boardId, project);
     const messageId = await this.sqsProducer.sendMessage(event);
     console.log(`[Webhook] SQS message sent: ${messageId}`);
+    return { enqueued: true, messageId };
   }
 
   private async fetchRetryFeedback(cardId: string): Promise<string | undefined> {

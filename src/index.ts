@@ -18,8 +18,8 @@ import { loadBoardConfig } from './config/board-config.js';
 import { JobTracker } from './tracking/job-tracker.js';
 import { LogBuffer } from './tracking/log-buffer.js';
 import { StreamBroadcaster } from './server/websocket.js';
-import { DeployWatcher } from './deploy/watcher.js';
 import { validateWorkerEvent } from './shared/types/worker-event.js';
+import { isPermanentError, isLikelyTransient } from './shared/errors.js';
 
 // --- Globals ---
 
@@ -72,6 +72,7 @@ async function main(): Promise<void> {
   // Authenticate gh CLI with GH_TOKEN (skip if not set)
   if (envConfig.ghToken) {
     await authenticateGhCli(envConfig.ghToken);
+    await logGhTokenScopes(envConfig.ghToken);
   } else {
     console.warn('[Worker] GH_TOKEN not set — gh CLI not authenticated');
   }
@@ -96,16 +97,9 @@ async function main(): Promise<void> {
   const sqsConsumer = new SqsConsumer(envConfig.sqsQueueUrl, envConfig.awsRegion);
   const sqsProducer = new SqsProducer(envConfig.sqsQueueUrl, envConfig.awsRegion);
 
-  // Deploy watcher — polls Railway API to confirm deploys before moving cards to Done
-  const deployWatcher = envConfig.railwayToken
-    ? new DeployWatcher(trelloApi, boardConfig, envConfig.railwayToken, commenter)
-    : undefined;
-
-  if (!deployWatcher) {
-    console.warn('[Worker] RAILWAY_TOKEN not set — cards move to Done immediately after QA (no deploy verification)');
-  }
-
-  // Orchestrator
+  // Orchestrator. After QA merge the card moves to Done immediately —
+  // CI/CD on Hostinger triggers automatically on commit, so the worker has
+  // no deploy status API to poll and shouldn't pretend to verify it.
   const orchestrator = new PipelineOrchestrator(
     implementStage,
     reviewStage,
@@ -117,16 +111,30 @@ async function main(): Promise<void> {
     boardConfig,
     jobTracker,
     broadcaster,
-    deployWatcher,
   );
 
-  // Webhook handler + Express server
+  // Webhook handler + Express server.
+  // Trello signs each request with HMAC(appSecret, rawBody + callbackUrl), so the
+  // public URL the webhook was registered against MUST match what we hash here.
+  const callbackUrl = envConfig.publicBaseUrl
+    ? envConfig.publicBaseUrl.replace(/\/+$/, '') + '/webhook'
+    : undefined;
+
+  if (envConfig.trelloWebhookSecret && !callbackUrl) {
+    console.warn(
+      '[Worker] TRELLO_WEBHOOK_SECRET is set but PUBLIC_BASE_URL is missing — '
+      + 'webhook verification will refuse all requests until PUBLIC_BASE_URL is configured',
+    );
+  } else if (callbackUrl) {
+    console.log(`[Worker] Webhook callback URL for HMAC: ${callbackUrl}`);
+  }
+
   const webhookHandler = new WebhookHandler(
     sqsProducer,
     boardConfig,
     trelloCredentials,
     envConfig.trelloWebhookSecret,
-    undefined, // callbackUrl resolved at runtime if needed
+    callbackUrl,
   );
   const app = createApp(webhookHandler, jobTracker, logBuffer);
 
@@ -161,11 +169,6 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  // Start deploy watcher polling (if Railway is configured and not auto-started from pending file)
-  if (deployWatcher) {
-    deployWatcher.start();
-  }
-
   // Start SQS polling loop (only if SQS is configured)
   if (envConfig.sqsQueueUrl) {
     console.log('[Worker] Starting SQS polling loop...');
@@ -188,10 +191,17 @@ async function pollLoop(consumer: SqsConsumer, orchestrator: PipelineOrchestrato
 
       console.log(`[Worker] Received ${messages.length} SQS message(s)`);
 
-      // Process all messages concurrently — repo locks handle same-repo serialization
+      // Process all messages concurrently — repo locks handle same-repo serialization.
+      //
+      // Retry semantics: deleteMessage runs only when the message was either
+      // processed successfully OR failed with a PermanentError. Any other failure
+      // (network, Trello/GitHub 5xx, transient timeouts) leaves the message in
+      // the queue so SQS redelivers it after the visibility timeout. Configure a
+      // DLQ on the queue with maxReceiveCount ~3 to stop infinite retries.
       const tasks = messages
         .filter((m) => m.Body)
         .map(async (message) => {
+          let shouldDelete = false;
           try {
             console.log(`[Worker] Processing SQS message: ${message.MessageId}`);
             const { event, pipelineContext } = parseSqsMessage(message.Body!);
@@ -201,21 +211,40 @@ async function pollLoop(consumer: SqsConsumer, orchestrator: PipelineOrchestrato
               console.warn(
                 `[Worker] Dropping malformed SQS message ${message.MessageId}: ${validationErrors.join('; ')}`,
               );
-              if (message.ReceiptHandle) {
-                await consumer.deleteMessage(message.ReceiptHandle);
-                console.log(`[Worker] Deleted malformed SQS message: ${message.MessageId}`);
-              }
+              shouldDelete = true;
               return;
             }
 
             await orchestrator.processEvent(event, pipelineContext);
-
-            if (message.ReceiptHandle) {
-              await consumer.deleteMessage(message.ReceiptHandle);
-              console.log(`[Worker] Deleted SQS message: ${message.MessageId}`);
-            }
+            shouldDelete = true;
           } catch (err) {
-            console.error(`[Worker] Message ${message.MessageId} failed: ${(err as Error).message}`);
+            const error = err as Error;
+            if (isPermanentError(err)) {
+              console.error(
+                `[Worker] Message ${message.MessageId} hit a permanent error, removing from queue: ${error.message}`,
+              );
+              shouldDelete = true;
+            } else if (isLikelyTransient(err)) {
+              console.warn(
+                `[Worker] Message ${message.MessageId} hit a transient error, will retry after visibility timeout: ${error.message}`,
+              );
+            } else {
+              // Unknown errors: keep the message so SQS redelivers; DLQ catches loops.
+              console.error(
+                `[Worker] Message ${message.MessageId} failed (will retry): ${error.message}`,
+              );
+            }
+          } finally {
+            if (shouldDelete && message.ReceiptHandle) {
+              try {
+                await consumer.deleteMessage(message.ReceiptHandle);
+                console.log(`[Worker] Deleted SQS message: ${message.MessageId}`);
+              } catch (deleteErr) {
+                console.error(
+                  `[Worker] Failed to delete SQS message ${message.MessageId}: ${(deleteErr as Error).message}`,
+                );
+              }
+            }
           }
         });
 
@@ -231,6 +260,49 @@ async function pollLoop(consumer: SqsConsumer, orchestrator: PipelineOrchestrato
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function logGhTokenScopes(token: string): Promise<void> {
+  // Hits GET /user with the token to read X-OAuth-Scopes (classic PATs) and
+  // confirm the token is actually valid. Helps diagnose "PR merges but branch
+  // never deletes" — almost always a missing Contents:Write or repo scope.
+  try {
+    const res = await fetch('https://api.github.com/user', {
+      headers: {
+        Authorization: `token ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+
+    if (!res.ok) {
+      console.warn(`[Worker] GH_TOKEN check failed: HTTP ${res.status} — token may be invalid or expired`);
+      return;
+    }
+
+    const scopes = res.headers.get('x-oauth-scopes');
+    const tokenType = res.headers.get('x-github-authentication-token-type') || 'classic';
+    const userLogin = ((await res.json()) as { login?: string }).login || '?';
+
+    if (scopes !== null) {
+      console.log(`[Worker] GH_TOKEN ok — user=${userLogin}, type=${tokenType}, scopes=[${scopes || 'none'}]`);
+      const required = ['repo'];
+      const missing = required.filter((s) => !scopes.split(/,\s*/).some((scope) => scope === s || scope.startsWith(`${s}:`)));
+      if (missing.length > 0) {
+        console.warn(
+          `[Worker] GH_TOKEN missing recommended scope(s): ${missing.join(', ')} — `
+          + `branch deletion or PR merge may fail. Classic PAT needs 'repo'; fine-grained needs Contents:Write + Pull requests:Write.`,
+        );
+      }
+    } else {
+      console.log(
+        `[Worker] GH_TOKEN ok — user=${userLogin}, type=${tokenType} (fine-grained, scopes not exposed via header). `
+        + `Ensure permissions include Contents:Read+Write and Pull requests:Read+Write.`,
+      );
+    }
+  } catch (err) {
+    console.warn(`[Worker] GH_TOKEN scope check failed: ${(err as Error).message}`);
+  }
 }
 
 async function authenticateGhCli(token: string): Promise<void> {

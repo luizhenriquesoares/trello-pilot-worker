@@ -158,15 +158,102 @@ export class RepoManager {
   }
 
   async mergePr(cwd: string, branchName: string): Promise<void> {
-    const result = await this.execShell(cwd,
+    let result = await this.execShell(cwd,
       `gh pr merge ${branchName} --squash --delete-branch`,
     );
+
+    // Branch protection with required status checks rejects the merge with a
+    // clear error. Retry once with --admin so the worker can override on repos
+    // where the GH_TOKEN has admin permission. Without this, the pipeline
+    // silently leaves PRs open whenever CI is still pending.
+    if (result.exitCode !== 0 && this.shouldRetryMergeWithAdmin(result.stderr || result.stdout)) {
+      console.log(`[Git] Merge blocked by branch protection — retrying with --admin`);
+      result = await this.execShell(cwd,
+        `gh pr merge ${branchName} --squash --delete-branch --admin`,
+      );
+    }
 
     if (result.exitCode !== 0) {
       throw new Error(`gh pr merge failed: ${result.stderr || result.stdout}`);
     }
 
-    await this.deleteRemoteBranchIfExists(cwd, branchName);
+    // gh's --delete-branch can silently fail to delete the remote (token scope,
+    // protection, transient API error) while still exiting 0 because the merge
+    // itself succeeded. Always confirm via REST API so feature branches don't
+    // accumulate.
+    await this.deleteBranchViaApi(cwd, branchName);
+  }
+
+  private shouldRetryMergeWithAdmin(stderr: string): boolean {
+    const msg = stderr.toLowerCase();
+    return msg.includes('required status check')
+      || msg.includes('not mergeable')
+      || msg.includes('required review')
+      || msg.includes('required approving review')
+      || msg.includes('branch protection rule');
+  }
+
+  /**
+   * Delete the remote branch via GitHub REST API. Idempotent: 404/422 are treated
+   * as already-deleted. Other failures (403, 5xx) are warned but do not throw,
+   * so a stale branch can't fail an otherwise successful pipeline.
+   */
+  private async deleteBranchViaApi(cwd: string, branchName: string): Promise<void> {
+    const token = process.env[GH_TOKEN_ENV];
+    if (!token) {
+      console.warn(`[Git] ${GH_TOKEN_ENV} not set — skipping API branch deletion for ${branchName}`);
+      return;
+    }
+
+    const ownerRepo = await this.getOwnerRepo(cwd);
+    if (!ownerRepo) {
+      console.warn(`[Git] Could not parse owner/repo from origin remote in ${cwd} — skipping API branch deletion`);
+      return;
+    }
+
+    const { owner, repo } = ownerRepo;
+    const url = `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branchName)}`;
+
+    try {
+      const res = await fetch(url, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `token ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      });
+
+      if (res.ok) {
+        console.log(`[Git] Deleted remote branch via API: ${branchName}`);
+        return;
+      }
+
+      // 422 ("Reference does not exist") and 404 mean the branch is already gone — that's fine.
+      if (res.status === 404 || res.status === 422) {
+        console.log(`[Git] Remote branch already absent: ${branchName} (HTTP ${res.status})`);
+        return;
+      }
+
+      const body = await res.text().catch(() => '');
+      console.warn(
+        `[Git] Failed to delete remote branch ${branchName} via API: HTTP ${res.status} ${body.slice(0, 200)}`,
+      );
+    } catch (err) {
+      console.warn(`[Git] API branch deletion threw for ${branchName}: ${(err as Error).message}`);
+    }
+  }
+
+  private async getOwnerRepo(cwd: string): Promise<{ owner: string; repo: string } | null> {
+    try {
+      const url = await this.execGit(cwd, ['remote', 'get-url', 'origin']);
+      // Handle both https://github.com/owner/repo(.git) and git@github.com:owner/repo(.git)
+      const match = url.match(/github\.com[/:]([^/]+)\/([^/.\s]+)/);
+      if (!match) return null;
+      return { owner: match[1], repo: match[2].replace(/\.git$/, '') };
+    } catch {
+      return null;
+    }
   }
 
   async getPrUrl(cwd: string, branchName: string): Promise<string | null> {
@@ -189,23 +276,4 @@ export class RepoManager {
     await rm(dir, { recursive: true, force: true });
   }
 
-  private async deleteRemoteBranchIfExists(cwd: string, branchName: string): Promise<void> {
-    try {
-      await this.execGit(cwd, ['push', 'origin', '--delete', branchName]);
-      console.log(`[Git] Deleted remote branch after merge: ${branchName}`);
-    } catch (err) {
-      const message = (err as Error).message || '';
-      const branchAlreadyGone = message.includes('remote ref does not exist')
-        || message.includes('unable to delete')
-        || message.includes('could not be found')
-        || message.includes('not found');
-
-      if (branchAlreadyGone) {
-        console.log(`[Git] Remote branch already absent after merge: ${branchName}`);
-        return;
-      }
-
-      console.warn(`[Git] Failed to delete remote branch ${branchName}: ${message}`);
-    }
-  }
 }

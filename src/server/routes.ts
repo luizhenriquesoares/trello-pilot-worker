@@ -8,7 +8,13 @@ const STARTED_AT = new Date().toISOString();
 export function createApp(webhookHandler: WebhookHandler, jobTracker: JobTracker, logBuffer: LogBuffer): Express {
   const app = express();
 
-  app.use(express.json());
+  // Capture raw body so the Trello webhook HMAC verifier can hash the exact bytes
+  // that were signed (re-serializing req.body would alter whitespace/key order).
+  app.use(express.json({
+    verify: (req, _res, buf) => {
+      (req as express.Request & { rawBody?: string }).rawBody = buf.toString('utf8');
+    },
+  }));
 
   // CORS for task-pilot frontend
   app.use((_req, res, next) => {
