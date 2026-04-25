@@ -2,10 +2,10 @@ import type { Request, Response } from 'express';
 import { SqsProducer } from '../sqs/producer.js';
 import { TrelloApi } from '../trello/api.js';
 import { verifyTrelloWebhookSignature } from '../trello/webhook-verifier.js';
-import { resolveProjectForList } from '../config/board-config.js';
+import { resolveProjectForList, resolveProjectByLabel } from '../config/board-config.js';
 import { PipelineStage } from '../shared/types/pipeline-stage.js';
 import type { WorkerEvent } from '../shared/types/worker-event.js';
-import type { BoardConfig } from '../config/types.js';
+import type { BoardConfig, ProjectList } from '../config/types.js';
 import type { TrelloCredentials } from '../trello/types.js';
 
 interface RawBodyRequest extends Request {
@@ -150,13 +150,37 @@ export class WebhookHandler {
     }
   }
 
+  /**
+   * Pick the project for a card. Prefers list-based routing (the historical
+   * mechanism) — projects with a dedicated Trello list match on `targetListId`.
+   * If the card landed in the configured triage list, fall back to label-based
+   * routing: fetch the card's labels and look for one matching a project name.
+   * Anything else is ignored.
+   */
+  private async resolveProject(cardId: string, targetListId: string): Promise<ProjectList | undefined> {
+    const direct = resolveProjectForList(this.boardConfig, targetListId);
+    if (direct) return direct;
+
+    const triageId = this.boardConfig.triageListId;
+    if (!triageId || targetListId !== triageId) return undefined;
+
+    try {
+      const trelloApi = new TrelloApi(this.trelloCredentials);
+      const fullCard = await trelloApi.getCard(cardId);
+      return resolveProjectByLabel(this.boardConfig, fullCard.labels || []);
+    } catch (err) {
+      console.warn(`[Webhook] Failed to resolve project by label for card ${cardId}: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
   private async handleCardMoved(
     card: { id: string; name: string; idShort: number },
     targetListId: string,
     sourceListId?: string,
     boardId?: string,
   ): Promise<{ enqueued: boolean; messageId?: string; ignored?: string }> {
-    const project = resolveProjectForList(this.boardConfig, targetListId);
+    const project = await this.resolveProject(card.id, targetListId);
     if (!project) {
       console.log(`[Webhook] Card "${card.name}" moved to non-project list, ignoring`);
       return { enqueued: false, ignored: 'non-project list' };
@@ -184,7 +208,7 @@ export class WebhookHandler {
     targetListId: string,
     boardId?: string,
   ): Promise<{ enqueued: boolean; messageId?: string; ignored?: string }> {
-    const project = resolveProjectForList(this.boardConfig, targetListId);
+    const project = await this.resolveProject(card.id, targetListId);
     if (!project) {
       console.log(`[Webhook] Card "${card.name}" created in non-project list, ignoring`);
       return { enqueued: false, ignored: 'non-project list' };
@@ -223,10 +247,20 @@ export class WebhookHandler {
   private buildWorkerEvent(
     cardId: string,
     boardId: string | undefined,
-    project: { id: string; name: string; repoUrl: string; baseBranch: string; branchPrefix: string; rules?: string[] },
+    project: ProjectList,
     isRetry = false,
     retryFeedback?: string,
   ): WorkerEvent {
+    // For mapped projects we anchor the stale-message guard on the project list.
+    // For label-routed projects we anchor on the triage list — the worst-case
+    // miss (label changed but list didn't) is still better than skipping the
+    // guard entirely.
+    const originListId = project.id ?? this.boardConfig.triageListId;
+    if (!originListId) {
+      throw new Error(
+        `Cannot build worker event for project "${project.name}": no list id and no triageListId configured`,
+      );
+    }
     const event: WorkerEvent = {
       cardId,
       boardId: boardId ?? this.boardConfig.boardId,
@@ -235,7 +269,7 @@ export class WebhookHandler {
       baseBranch: project.baseBranch,
       branchPrefix: project.branchPrefix,
       rules: project.rules ?? this.boardConfig.rules,
-      originListId: project.id,
+      originListId,
       projectName: project.name,
       trelloCredentials: this.trelloCredentials,
     };

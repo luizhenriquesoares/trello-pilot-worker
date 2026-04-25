@@ -130,6 +130,41 @@ describe('WebhookHandler.handleWebhook', () => {
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
+  it('routes a card in the triage list by label to the matching label-only project', async () => {
+    const sqs = mockSqsProducer();
+    const triageBoardConfig: BoardConfig = {
+      ...boardConfig,
+      triageListId: 'l-triage',
+      projectLists: [
+        ...boardConfig.projectLists,
+        { name: 'Admin API', repoUrl: 'https://github.com/maismilhas-br/maismilhas.admin.api', baseBranch: 'main', branchPrefix: 'feat/' },
+      ],
+    };
+    const handler = new WebhookHandler(sqs, triageBoardConfig, trelloCredentials, undefined, undefined);
+
+    // Stub the trello API call that resolveProject uses to fetch labels for triage cards.
+    type ResolveStub = (cardId: string, listId: string) => Promise<unknown>;
+    (handler as unknown as { resolveProject: ResolveStub }).resolveProject = async (cardId: string, listId: string) => {
+      if (listId !== 'l-triage') return undefined;
+      void cardId;
+      return triageBoardConfig.projectLists.find((p) => !p.id && p.name === 'Admin API');
+    };
+
+    const action = buildCardCreatedAction();
+    action.data.list.id = 'l-triage';
+    const req = { body: { action }, headers: {} } as unknown as Request;
+    const res = mockResponse();
+
+    await handler.handleWebhook(req, res);
+
+    expect(sqs.sendMessage).toHaveBeenCalledTimes(1);
+    const enqueued = (sqs.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(enqueued.repoUrl).toBe('https://github.com/maismilhas-br/maismilhas.admin.api');
+    expect(enqueued.projectName).toBe('Admin API');
+    // For label-routed cards we anchor the stale guard on the triage list id.
+    expect(enqueued.originListId).toBe('l-triage');
+  });
+
   it('detects retry mode when card moves from Done back to a project list', async () => {
     const sqs = mockSqsProducer();
     // Stub fetchRetryFeedback so we don't make a real Trello API call.

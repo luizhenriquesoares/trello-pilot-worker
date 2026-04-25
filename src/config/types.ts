@@ -1,5 +1,10 @@
 export interface ProjectList {
-  id: string;
+  /**
+   * Trello list id for projects with a dedicated workflow list. Optional —
+   * projects without an `id` are routed via the triage list + a Trello label
+   * matching the `name` field.
+   */
+  id?: string;
   name: string;
   repoUrl: string;
   baseBranch: string;
@@ -15,6 +20,13 @@ export interface BoardConfig {
     qa: string;
     done: string;
   };
+  /**
+   * Optional shared list where cards for projects without their own list land.
+   * The worker resolves the repo for those cards by reading their Trello label
+   * (matched against `ProjectList.name`). If unset, label-based routing is
+   * disabled and only projects with `id` are reachable.
+   */
+  triageListId?: string;
   projectLists: ProjectList[];
   rules: string[];
 }

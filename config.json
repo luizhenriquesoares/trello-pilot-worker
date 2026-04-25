@@ -6,6 +6,7 @@
     "qa": "65b7a8a74c70fdf74eb9cb95",
     "done": "69cc7d354e50b7bde5a35dd7"
   },
+  "triageListId": "69ecaa3c0aabb0dbe2c4e61a",
   "projectLists": [
     {
       "id": "65b12c0d92522b3e35598e5b",
@@ -41,7 +42,24 @@
       "repoUrl": "https://github.com/maismilhas-br/maismilhas.content.ai",
       "baseBranch": "main",
       "branchPrefix": "feat/"
-    }
+    },
+    { "name": "Admin API", "repoUrl": "https://github.com/maismilhas-br/maismilhas.admin.api", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Admin Web", "repoUrl": "https://github.com/maismilhas-br/maismilhas.admin.web", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "App B2B Mobile", "repoUrl": "https://github.com/maismilhas-br/maismilhas.b2b.mobile", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "App Site Mobile", "repoUrl": "https://github.com/maismilhas-br/maismilhas.site.mobile", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Área do Cliente", "repoUrl": "https://github.com/maismilhas-br/maismilhas.cliente.web", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Browser Extensions", "repoUrl": "https://github.com/maismilhas-br/maismilhas.browser.extensions", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Cybersecurity", "repoUrl": "https://github.com/maismilhas-br/maismilhas.cybersecurity.app", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Flight Search", "repoUrl": "https://github.com/maismilhas-br/maismilhas.flight.search", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Messaging Service", "repoUrl": "https://github.com/maismilhas-br/maismilhas.messaging.service", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Miles Robot", "repoUrl": "https://github.com/maismilhas-br/maismilhas.miles.robot", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Quotation Lambda", "repoUrl": "https://github.com/maismilhas-br/maismilhas.quotation.lambda", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Quotation Orchestrator", "repoUrl": "https://github.com/maismilhas-br/maismilhas.quotation.orchestrator", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Risk API", "repoUrl": "https://github.com/maismilhas-br/maismilhas.risk.api", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Rules Engine API", "repoUrl": "https://github.com/maismilhas-br/maismilhas.rules.engine.api", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "Site API", "repoUrl": "https://github.com/maismilhas-br/maismilhas.site.api", "baseBranch": "master", "branchPrefix": "feat/" },
+    { "name": "Site API Test", "repoUrl": "https://github.com/maismilhas-br/maismilhas.site-api.test", "baseBranch": "main", "branchPrefix": "feat/" },
+    { "name": "WhatsApp Lambda", "repoUrl": "https://github.com/maismilhas-br/maismilhas.whatsapp.lambda", "baseBranch": "master", "branchPrefix": "feat/" }
   ],
   "rules": [
     "SEMPRE leia o CLAUDE.md e a estrutura do projeto antes de começar qualquer implementação",
