@@ -136,7 +136,7 @@ async function main(): Promise<void> {
     envConfig.trelloWebhookSecret,
     callbackUrl,
   );
-  const app = createApp(webhookHandler, jobTracker, logBuffer);
+  const app = createApp(webhookHandler, jobTracker, logBuffer, orchestrator);
 
   // Create HTTP server (needed for both Express + WebSocket)
   const server = createServer(app);
