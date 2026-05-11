@@ -83,7 +83,7 @@ function buildOrchestrator(opts: {
     boardConfig,
   );
 
-  return { orchestrator, reviewExecute, qaExecute, postError, slackNotifier };
+  return { orchestrator, reviewExecute, qaExecute, postError, slackNotifier, sqsProducer };
 }
 
 describe('PipelineOrchestrator — no-diff guard', () => {
@@ -143,5 +143,91 @@ describe('PipelineOrchestrator — no-diff guard', () => {
 
     await expect(orchestrator.processEvent(event)).rejects.toThrow(/no commits/i);
     expect(reviewExecute).not.toHaveBeenCalled();
+  });
+});
+
+describe('PipelineOrchestrator — repo lock management', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function buildIdleOrchestrator() {
+    return buildOrchestrator({
+      implementResult: {
+        branchName: 'feat/x',
+        prUrl: '',
+        workDir: '/tmp/no-such-dir',
+        costUsd: 0,
+        durationMs: 0,
+        commitSummary: 'noop', // skip the no-diff guard so we hit the lock release
+      },
+    });
+  }
+
+  it('listRepoLocks() reports nothing when idle', () => {
+    const { orchestrator } = buildIdleOrchestrator();
+    expect(orchestrator.listRepoLocks()).toEqual([]);
+  });
+
+  it('releaseRepoLock() returns released:false when there is no lock', () => {
+    const { orchestrator } = buildIdleOrchestrator();
+    const result = orchestrator.releaseRepoLock('https://github.com/org/missing');
+    expect(result).toEqual({ released: false });
+  });
+
+  it('lock auto-expires past TTL — second card steals it instead of being re-enqueued', async () => {
+    // 65min TTL + a hair of slack
+    const STALE_MS = 70 * 60 * 1000;
+    vi.useFakeTimers();
+    const t0 = Date.now();
+
+    const { orchestrator, sqsProducer } = buildIdleOrchestrator();
+
+    // Plant a stale lock from a phantom previous card by reaching into the Map.
+    // Going through processEvent for the first card would also work, but it would
+    // run the whole pipeline; planting is the surgical setup for this assertion.
+    (orchestrator as unknown as { repoLocks: Map<string, { cardId: string; acquiredAt: number }> })
+      .repoLocks.set(event.repoUrl, { cardId: 'orphaned-card', acquiredAt: t0 });
+
+    vi.setSystemTime(t0 + STALE_MS);
+
+    // Second card hits processEvent. The stale lock should be reassigned, NOT
+    // cause a re-enqueue with delay.
+    await orchestrator.processEvent({ ...event, cardId: 'card-2' }).catch(() => { /* pipeline mocks throw — irrelevant */ });
+
+    expect(sqsProducer.sendWithDelay).not.toHaveBeenCalled();
+  });
+
+  it('lock within TTL still re-enqueues the second card', async () => {
+    vi.useFakeTimers();
+    const t0 = Date.now();
+
+    const { orchestrator, sqsProducer } = buildIdleOrchestrator();
+
+    (orchestrator as unknown as { repoLocks: Map<string, { cardId: string; acquiredAt: number }> })
+      .repoLocks.set(event.repoUrl, { cardId: 'still-running', acquiredAt: t0 });
+
+    // 10min — well under the 65min TTL
+    vi.setSystemTime(t0 + 10 * 60 * 1000);
+
+    await orchestrator.processEvent({ ...event, cardId: 'card-2' });
+
+    expect(sqsProducer.sendWithDelay).toHaveBeenCalledTimes(1);
+    expect(sqsProducer.sendWithDelay).toHaveBeenCalledWith(
+      expect.objectContaining({ event: expect.objectContaining({ cardId: 'card-2' }) }),
+      60,
+    );
+  });
+
+  it('releaseRepoLock() removes a held lock and returns the previous holder', () => {
+    const { orchestrator } = buildIdleOrchestrator();
+
+    (orchestrator as unknown as { repoLocks: Map<string, { cardId: string; acquiredAt: number }> })
+      .repoLocks.set('https://github.com/org/repo', { cardId: 'stuck-card', acquiredAt: Date.now() });
+
+    const result = orchestrator.releaseRepoLock('https://github.com/org/repo');
+    expect(result).toEqual({ released: true, previousCardId: 'stuck-card' });
+    expect(orchestrator.listRepoLocks()).toEqual([]);
   });
 });

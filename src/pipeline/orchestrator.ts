@@ -18,8 +18,20 @@ import type { BoardConfig } from '../config/types.js';
 // queue if external code re-enqueues them, which the worker no longer does —
 // so we treat any REVIEW/QA event as a stale message from a previous deploy
 // and reject it as permanent so the SQS DLQ catches it instead of looping.
+
+// Lock auto-expires past this point. Slightly larger than STAGE_TIMEOUT_MS
+// (60min) so the in-pipeline timeout always fires first under normal flow;
+// TTL is the safety net for orphaned locks (process killed mid-run before
+// the finally block, etc.) so other cards on the same repo eventually unblock.
+const LOCK_TTL_MS = 65 * 60 * 1000;
+
+interface RepoLock {
+  cardId: string;
+  acquiredAt: number;
+}
+
 export class PipelineOrchestrator {
-  private readonly repoLocks = new Map<string, string>(); // repoUrl → cardId
+  private readonly repoLocks = new Map<string, RepoLock>(); // repoUrl → lock
 
   constructor(
     private readonly implementStage: ImplementStage,
@@ -51,18 +63,30 @@ export class PipelineOrchestrator {
 
     // Repo lock: prevent concurrent tasks on the same repository
     const lockHolder = this.repoLocks.get(event.repoUrl);
-    if (lockHolder && lockHolder !== event.cardId) {
-      console.log(
-        `[Orchestrator] Repo ${event.repoUrl} is locked by card ${lockHolder}. ` +
-        `Re-enqueueing card ${event.cardId} with 60s delay.`,
-      );
-      const envelope: SqsMessageEnvelope = { event, pipelineContext };
-      await this.sqsProducer.sendWithDelay(envelope, 60);
-      return;
+    if (lockHolder && lockHolder.cardId !== event.cardId) {
+      const heldFor = Date.now() - lockHolder.acquiredAt;
+      if (heldFor > LOCK_TTL_MS) {
+        // Stale lock: holder card never released (process killed mid-pipeline,
+        // STAGE_TIMEOUT didn't fire, etc.). Steal it so this repo isn't blocked forever.
+        console.warn(
+          `[Orchestrator] Repo ${event.repoUrl} lock held by card ${lockHolder.cardId} ` +
+          `for ${Math.round(heldFor / 60_000)}min (> ${LOCK_TTL_MS / 60_000}min TTL). ` +
+          `Treating as stale and reassigning to card ${event.cardId}.`,
+        );
+        // fall through to acquire below
+      } else {
+        console.log(
+          `[Orchestrator] Repo ${event.repoUrl} is locked by card ${lockHolder.cardId}. ` +
+          `Re-enqueueing card ${event.cardId} with 60s delay.`,
+        );
+        const envelope: SqsMessageEnvelope = { event, pipelineContext };
+        await this.sqsProducer.sendWithDelay(envelope, 60);
+        return;
+      }
     }
 
     // Acquire repo lock
-    this.repoLocks.set(event.repoUrl, event.cardId);
+    this.repoLocks.set(event.repoUrl, { cardId: event.cardId, acquiredAt: Date.now() });
     console.log(`[Orchestrator] Acquired repo lock for ${event.repoUrl} (card ${event.cardId})`);
 
     const stageName = 'implement';
@@ -140,7 +164,7 @@ export class PipelineOrchestrator {
       throw err;
     } finally {
       // Release repo lock
-      if (this.repoLocks.get(event.repoUrl) === event.cardId) {
+      if (this.repoLocks.get(event.repoUrl)?.cardId === event.cardId) {
         this.repoLocks.delete(event.repoUrl);
         console.log(`[Orchestrator] Released repo lock for ${event.repoUrl} (card ${event.cardId})`);
       }
@@ -149,6 +173,35 @@ export class PipelineOrchestrator {
       // so there's nothing additional to remove here.
       void pipelineContext;
     }
+  }
+
+  /**
+   * Snapshot of all currently held repo locks.
+   * Used by GET /api/admin/locks to surface stuck cards in ops UI.
+   */
+  listRepoLocks(): Array<{ repoUrl: string; cardId: string; acquiredAt: string; heldForMs: number }> {
+    const now = Date.now();
+    return Array.from(this.repoLocks.entries()).map(([repoUrl, lock]) => ({
+      repoUrl,
+      cardId: lock.cardId,
+      acquiredAt: new Date(lock.acquiredAt).toISOString(),
+      heldForMs: now - lock.acquiredAt,
+    }));
+  }
+
+  /**
+   * Force-release a repo lock. Returns the prior holder cardId if a lock existed.
+   * Used by POST /api/admin/release-lock to unstick orphaned locks without restart.
+   */
+  releaseRepoLock(repoUrl: string): { released: boolean; previousCardId?: string } {
+    const existing = this.repoLocks.get(repoUrl);
+    if (!existing) return { released: false };
+    this.repoLocks.delete(repoUrl);
+    console.warn(
+      `[Orchestrator] Manually released repo lock for ${repoUrl} ` +
+      `(was held by card ${existing.cardId})`,
+    );
+    return { released: true, previousCardId: existing.cardId };
   }
 
   /**

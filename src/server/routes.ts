@@ -2,10 +2,16 @@ import express, { type Express } from 'express';
 import { WebhookHandler } from './webhook-handler.js';
 import { JobTracker } from '../tracking/job-tracker.js';
 import { LogBuffer } from '../tracking/log-buffer.js';
+import type { PipelineOrchestrator } from '../pipeline/orchestrator.js';
 
 const STARTED_AT = new Date().toISOString();
 
-export function createApp(webhookHandler: WebhookHandler, jobTracker: JobTracker, logBuffer: LogBuffer): Express {
+export function createApp(
+  webhookHandler: WebhookHandler,
+  jobTracker: JobTracker,
+  logBuffer: LogBuffer,
+  orchestrator: PipelineOrchestrator,
+): Express {
   const app = express();
 
   // Capture raw body so the Trello webhook HMAC verifier can hash the exact bytes
@@ -74,6 +80,23 @@ export function createApp(webhookHandler: WebhookHandler, jobTracker: JobTracker
       memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // Admin: list and release in-memory repo locks. The worker is on an internal
+  // Hostinger network behind the task-pilot dashboard (which has bearer auth),
+  // so these match the existing no-auth pattern of /api/jobs and /api/logs.
+  app.get('/api/admin/locks', (_req, res) => {
+    res.json(orchestrator.listRepoLocks());
+  });
+
+  app.post('/api/admin/release-lock', (req, res) => {
+    const repoUrl = (req.body as { repoUrl?: unknown })?.repoUrl;
+    if (typeof repoUrl !== 'string' || !repoUrl) {
+      res.status(400).json({ error: 'repoUrl (string) is required in body' });
+      return;
+    }
+    const result = orchestrator.releaseRepoLock(repoUrl);
+    res.json(result);
   });
 
   // Trello webhook verification (HEAD)
